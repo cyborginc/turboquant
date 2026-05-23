@@ -9,8 +9,31 @@
 // Recall@K is measured for each bit width vs. the float32 brute-force baseline.
 // Speeds: ingest (quant vs none), read (dequant vs none), distance (ADC vs BLAS GEMM).
 
+#if defined(TURBOQUANT_USE_ACCELERATE)
+// Opt into the newer CBLAS surface so cblas_sgemm isn't flagged deprecated.
+#define ACCELERATE_NEW_LAPACK
+#include <Accelerate/Accelerate.h>
+#else
 #include <cblas.h>
+#endif
 #include <hdf5.h>
+
+// IEEE 754 binary16 conversion. On ARM64 (Apple Silicon) the compiler lowers
+// these casts to native FCVTL/FCVTN instructions, so the loops auto-vectorize
+// without any intrinsic calls.
+#if defined(__aarch64__) || defined(__ARM_FP16_FORMAT_IEEE)
+#define TURBOQUANT_HAS_FP16 1
+inline void Fp32ToFp16(const float* src, size_t n, uint16_t* dst) {
+  __fp16* d = reinterpret_cast<__fp16*>(dst);
+  for (size_t i = 0; i < n; ++i) d[i] = static_cast<__fp16>(src[i]);
+}
+inline void Fp16ToFp32(const uint16_t* src, size_t n, float* dst) {
+  const __fp16* s = reinterpret_cast<const __fp16*>(src);
+  for (size_t i = 0; i < n; ++i) dst[i] = static_cast<float>(s[i]);
+}
+#else
+#define TURBOQUANT_HAS_FP16 0
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -29,7 +52,6 @@
 
 namespace {
 
-using turboquant::AdcScore;
 using turboquant::PayloadSize;
 using turboquant::QuantBits;
 using turboquant::Quantize;
@@ -239,6 +261,19 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 1000.0 * t_baseline_copy,
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / t_baseline_copy);
   }
+#if TURBOQUANT_HAS_FP16
+  // fp16 ingest: convert the whole train set fp32 -> fp16 (no rotation,
+  // 2 bytes / dim). Hardware-accelerated on ARM64.
+  std::vector<uint16_t> fp16_train(ds.n_train * ds.dim);
+  {
+    const double t0 = Now();
+    Fp32ToFp16(ds.train.data(), ds.n_train * ds.dim, fp16_train.data());
+    const double dt = Now() - t0;
+    std::printf("%-8s %15.2f %15.2f  (fp16, 2 bytes/dim, no rotation)\n",
+                "fp16", 1000.0 * dt,
+                (ds.n_train * ds.dim * 2) / 1e6 / dt);
+  }
+#endif
   for (int bi = 0; bi < 6; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = PayloadSize(ds.dim, b);
@@ -256,10 +291,24 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 
   // -------------------- Read speed (dequantize) --------------------
   std::printf("\n[Read: dequantize one full pass of train set]\n");
-  std::printf("%-8s %15s %15s\n", "bits", "ms_total", "MB/s_floats");
-  std::printf("%-8s %15.2f %15.2f  (baseline memcpy)\n", "f32",
+  std::printf("%-10s %-8s %15s %15s\n", "variant", "bits", "ms_total",
+              "MB/s_floats");
+  std::printf("%-10s %-8s %15.2f %15.2f  (baseline memcpy)\n", "memcpy", "f32",
               1000.0 * t_baseline_copy,
               (ds.n_train * ds.dim * sizeof(float)) / 1e6 / t_baseline_copy);
+#if TURBOQUANT_HAS_FP16
+  {
+    std::vector<float> out(ds.dim);
+    const double t0 = Now();
+    for (size_t i = 0; i < ds.n_train; ++i) {
+      Fp16ToFp32(fp16_train.data() + i * ds.dim, ds.dim, out.data());
+    }
+    const double dt = Now() - t0;
+    std::printf("%-10s %-8s %15.2f %15.2f\n", "fp16->f32", "fp16",
+                1000.0 * dt,
+                (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
+  }
+#endif
   for (int bi = 0; bi < 6; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
@@ -270,17 +319,18 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                              out.data());
     }
     const double dt = Now() - t0;
-    std::printf("%-8d %15.2f %15.2f\n", static_cast<int>(b), 1000.0 * dt,
+    std::printf("%-10s %-8d %15.2f %15.2f\n", "deq", static_cast<int>(b),
+                1000.0 * dt,
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
   }
 
   // -------------------- Distance speed --------------------
-  // Three paths compared, per bit width:
+  // Two paths compared, per bit width and per dequant variant:
   //   f32 (BLAS)          : sgemm(test, train^T) on original floats.
-  //   ADC                 : per-pair AdcScore against packed codes.
   //   Dequant + BLAS      : dequantize the whole base back to float32 once,
   //                         then sgemm against the dequantized base.
-  // The recall column is computed against the float32 BLAS ground truth.
+  // We run deq+BLAS once with the original Dequantize and once with
+  // DequantizeFast so the speed and recall can be compared side by side.
   const size_t Nq = std::min<size_t>(ds.n_test, 1000);
   std::printf("\n[Distance: %zu queries x %zu base vectors]\n", Nq, ds.n_train);
 
@@ -296,12 +346,6 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 static_cast<int>(ds.dim), 0.0f, blas_scores.data(),
                 static_cast<int>(ds.n_train));
     t_blas = Now() - t0;
-  }
-
-  // Pre-rotate all queries once (ADC needs them in the rotated space).
-  std::vector<std::vector<float>> q_rot(Nq, std::vector<float>(R.padded_dim()));
-  for (size_t i = 0; i < Nq; ++i) {
-    turboquant::RotateQuery(R, ds.test.data() + i * ds.dim, q_rot[i].data());
   }
 
   // Precompute base norms (needed for euclidean ranking from a dot-product source).
@@ -336,12 +380,72 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
   }
 
   // Header
-  std::printf("\n%-14s %12s %12s %10s %12s\n",
+  std::printf("\n%-18s %12s %12s %10s %12s\n",
               "path", "ms_total", "Mops/s", "recall@K", "rel_vs_f32");
-  std::printf("%-14s %12.2f %12.2f %10.4f %12s\n",
+  std::printf("%-18s %12.2f %12.2f %10.4f %12s\n",
               "f32 (BLAS)", 1000.0 * t_blas,
               static_cast<double>(Nq) * ds.n_train / 1e6 / t_blas,
               1.0, "1.00x");
+
+#if TURBOQUANT_HAS_FP16
+  // fp16+BLAS: convert the entire fp16 base back to fp32 in one shot, then
+  // sgemm. No rotation, no per-vector scale; storage is 2 bytes/dim.
+  {
+    std::vector<float> fp16_dec(ds.n_train * ds.dim);
+    const double t_dec0 = Now();
+    Fp16ToFp32(fp16_train.data(), ds.n_train * ds.dim, fp16_dec.data());
+    const double t_dec = Now() - t_dec0;
+
+    std::vector<float> fp16_dots(Nq * ds.n_train);
+    const double t_gemm0 = Now();
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                static_cast<int>(Nq), static_cast<int>(ds.n_train),
+                static_cast<int>(ds.dim), 1.0f, ds.test.data(),
+                static_cast<int>(ds.dim), fp16_dec.data(),
+                static_cast<int>(ds.dim), 0.0f, fp16_dots.data(),
+                static_cast<int>(ds.n_train));
+    const double t_gemm = Now() - t_gemm0;
+
+    std::vector<float> fp16_norms2;
+    if (!angular) {
+      fp16_norms2.resize(ds.n_train);
+      for (size_t j = 0; j < ds.n_train; ++j) {
+        double s = 0;
+        for (size_t d = 0; d < ds.dim; ++d) {
+          const float v = fp16_dec[j * ds.dim + d];
+          s += v * v;
+        }
+        fp16_norms2[j] = static_cast<float>(s);
+      }
+    }
+    double recall_sum = 0;
+    {
+      std::vector<float> ranked(ds.n_train);
+      for (size_t i = 0; i < Nq; ++i) {
+        const float* row = fp16_dots.data() + i * ds.n_train;
+        if (angular) {
+          for (size_t j = 0; j < ds.n_train; ++j) ranked[j] = row[j];
+        } else {
+          for (size_t j = 0; j < ds.n_train; ++j) {
+            ranked[j] = fp16_norms2[j] - 2.0f * row[j];
+          }
+        }
+        std::vector<int32_t> top;
+        TopKByScore(ranked.data(), ds.n_train, k_eval, &top,
+                    /*larger_is_better=*/angular ? true : false);
+        recall_sum += Recall(top, gt_topk[i].data(), k_eval);
+      }
+    }
+    const double t_total = t_dec + t_gemm;
+    const double ops = static_cast<double>(Nq) * ds.n_train;
+    char rel[16];
+    std::snprintf(rel, sizeof(rel), "%.2fx", t_total / t_blas);
+    std::printf("%-18s %12.2f %12.2f %10.4f %12s"
+                "  (%.0fms dec + %.0fms gemm)\n",
+                "fp16+BLAS", 1000.0 * t_total, ops / 1e6 / t_total,
+                recall_sum / Nq, rel, 1000.0 * t_dec, 1000.0 * t_gemm);
+  }
+#endif
 
   auto ScoresToRanking = [&](const float* dots, std::vector<float>* out,
                              const float* base_norm2_for_dequant) {
@@ -365,26 +469,6 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
 
-    // -------- ADC path --------
-    double adc_recall_sum = 0;
-    const double t_adc0 = Now();
-    {
-      std::vector<float> scores(ds.n_train);
-      for (size_t i = 0; i < Nq; ++i) {
-        const float* qr = q_rot[i].data();
-        for (size_t j = 0; j < ds.n_train; ++j) {
-          auto s = AdcScore(R, b, qr, all_payloads[bi].data() + j * ps);
-          scores[j] = angular ? s.dot : (s.decoded_norm2 - 2.0f * s.dot);
-        }
-        std::vector<int32_t> top;
-        TopKByScore(scores.data(), ds.n_train, k_eval, &top,
-                    /*larger_is_better=*/angular ? true : false);
-        adc_recall_sum += Recall(top, gt_topk[i].data(), k_eval);
-      }
-    }
-    const double t_adc = Now() - t_adc0;
-
-    // -------- Dequant + BLAS path --------
     // Step 1: dequantize the entire base into a row-major float32 matrix.
     dequant_buf.assign(ds.n_train * ds.dim, 0.0f);
     const double t_deq0 = Now();
@@ -412,8 +496,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
       for (size_t j = 0; j < ds.n_train; ++j) {
         double s = 0;
         for (size_t d = 0; d < ds.dim; ++d) {
-          const float v = dequant_buf[j * ds.dim + d];
-          s += v * v;
+          const float vv = dequant_buf[j * ds.dim + d];
+          s += vv * vv;
         }
         deq_norms2[j] = static_cast<float>(s);
       }
@@ -434,21 +518,14 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     const double t_deqblas = t_deq + t_gemm;
 
     const double ops = static_cast<double>(Nq) * ds.n_train;
-    char label_adc[32], label_deq[32];
-    std::snprintf(label_adc, sizeof(label_adc), "b%-2d (ADC)",
-                  static_cast<int>(b));
-    std::snprintf(label_deq, sizeof(label_deq), "b%-2d (deq+BLAS)",
-                  static_cast<int>(b));
-    char rel_adc[16], rel_deq[16];
-    std::snprintf(rel_adc, sizeof(rel_adc), "%.2fx", t_adc / t_blas);
-    std::snprintf(rel_deq, sizeof(rel_deq), "%.2fx", t_deqblas / t_blas);
-
-    std::printf("%-14s %12.2f %12.2f %10.4f %12s\n", label_adc,
-                1000.0 * t_adc, ops / 1e6 / t_adc,
-                adc_recall_sum / Nq, rel_adc);
-    std::printf("%-14s %12.2f %12.2f %10.4f %12s  (%.0fms deq + %.0fms gemm)\n",
-                label_deq, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas,
-                deq_recall_sum / Nq, rel_deq,
+    char label[40];
+    std::snprintf(label, sizeof(label), "b%-2d deq+BLAS", static_cast<int>(b));
+    char rel[16];
+    std::snprintf(rel, sizeof(rel), "%.2fx", t_deqblas / t_blas);
+    std::printf("%-18s %12.2f %12.2f %10.4f %12s"
+                "  (%.0fms deq + %.0fms gemm)\n",
+                label, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas,
+                deq_recall_sum / Nq, rel,
                 1000.0 * t_deq, 1000.0 * t_gemm);
   }
 }

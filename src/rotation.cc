@@ -76,6 +76,70 @@ void ApplySignsImpl(float* data, const float* signs, size_t n) {
   for (; i < n; ++i) data[i] *= signs[i];
 }
 
+// --- Fast variants -------------------------------------------------------
+
+void ApplySignsAndScaleImpl(float* data, const float* signs, size_t n,
+                            float scale) {
+  const hn::ScalableTag<float> d;
+  const size_t lanes = hn::Lanes(d);
+  const auto vscale = hn::Set(d, scale);
+  size_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto vd = hn::LoadU(d, data + i);
+    auto vs = hn::LoadU(d, signs + i);
+    hn::StoreU(hn::Mul(hn::Mul(vd, vs), vscale), d, data + i);
+  }
+  for (; i < n; ++i) data[i] = data[i] * signs[i] * scale;
+}
+
+// In-register fused stage(s). For every lane count we can do h=1 with
+// DupEven/DupOdd + OddEven. On 4-lane targets we additionally fold h=2 via
+// the half-half permutes. After this pass the next memory butterfly starts at
+// h = (returned `h_done` * 2). Returns the largest in-register h actually
+// applied.
+size_t FusedInRegisterPass(float* data, size_t n) {
+  const hn::ScalableTag<float> d;
+  const size_t lanes = hn::Lanes(d);
+  if (lanes < 2 || n < lanes) return 0;
+
+  if (lanes == 4) {
+    // Fuse h=1 and h=2 in one register.
+    for (size_t i = 0; i + lanes <= n; i += lanes) {
+      auto v = hn::LoadU(d, data + i);
+      // h=1: pair adjacent lanes.
+      auto e = hn::DupEven(v);
+      auto o = hn::DupOdd(v);
+      v = hn::OddEven(hn::Sub(e, o), hn::Add(e, o));
+      // h=2: pair the two halves of the (now post-h=1) vector.
+      auto lo = hn::ConcatLowerLower(d, v, v);
+      auto hi = hn::ConcatUpperUpper(d, v, v);
+      v = hn::ConcatLowerLower(d, hn::Sub(lo, hi), hn::Add(lo, hi));
+      hn::StoreU(v, d, data + i);
+    }
+    return 2;
+  }
+
+  // Lanes > 4: do h=1 only. h=2 within a vector spans non-half regions and is
+  // not portable enough to be worth a target-specific path here.
+  for (size_t i = 0; i + lanes <= n; i += lanes) {
+    auto v = hn::LoadU(d, data + i);
+    auto e = hn::DupEven(v);
+    auto o = hn::DupOdd(v);
+    v = hn::OddEven(hn::Sub(e, o), hn::Add(e, o));
+    hn::StoreU(v, d, data + i);
+  }
+  return 1;
+}
+
+void FastHadamardTransformUnscaledImpl(float* data, size_t n) {
+  if (n <= 1) return;
+  const size_t h_done = FusedInRegisterPass(data, n);
+  for (size_t h = (h_done == 0 ? 1 : h_done * 2); h < n; h <<= 1) {
+    ButterflyStride(data, n, h);
+  }
+  // No scaling here — caller pairs this with ApplySignsAndScale.
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace turboquant
 HWY_AFTER_NAMESPACE();
@@ -85,6 +149,8 @@ namespace turboquant {
 
 HWY_EXPORT(HadamardTransformImpl);
 HWY_EXPORT(ApplySignsImpl);
+HWY_EXPORT(FastHadamardTransformUnscaledImpl);
+HWY_EXPORT(ApplySignsAndScaleImpl);
 
 void HadamardTransform(float* data, size_t n) {
   HWY_DYNAMIC_DISPATCH(HadamardTransformImpl)(data, n);
@@ -92,6 +158,15 @@ void HadamardTransform(float* data, size_t n) {
 
 void ApplySigns(float* data, const float* signs, size_t n) {
   HWY_DYNAMIC_DISPATCH(ApplySignsImpl)(data, signs, n);
+}
+
+void FastHadamardTransformUnscaled(float* data, size_t n) {
+  HWY_DYNAMIC_DISPATCH(FastHadamardTransformUnscaledImpl)(data, n);
+}
+
+void ApplySignsAndScale(float* data, const float* signs, size_t n,
+                        float scale) {
+  HWY_DYNAMIC_DISPATCH(ApplySignsAndScaleImpl)(data, signs, n, scale);
 }
 
 }  // namespace turboquant

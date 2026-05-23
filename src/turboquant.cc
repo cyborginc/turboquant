@@ -13,8 +13,7 @@ namespace turboquant {
 
 namespace {
 
-constexpr size_t kHeaderBytes = 16;
-constexpr size_t kReservedBytes = 12;
+constexpr size_t kHeaderBytes = 4;  // 4-byte scale (LE float32).
 
 size_t NextPow2(size_t x) {
   if (x <= 1) return 1;
@@ -36,7 +35,6 @@ int Bits(QuantBits b) { return static_cast<int>(b); }
 
 thread_local std::vector<float> tls_rotated;
 thread_local std::vector<uint16_t> tls_codes;
-thread_local std::vector<float> tls_inv_tmp;
 
 }  // namespace
 
@@ -61,22 +59,23 @@ Rotator::Rotator(size_t dim, uint64_t seed)
 }
 
 void Rotator::Apply(const float* x, float* out) const {
-  // Pad with zeros.
-  for (size_t i = 0; i < dim_; ++i) out[i] = x[i];
-  for (size_t i = dim_; i < padded_dim_; ++i) out[i] = 0.0f;
+  std::memcpy(out, x, dim_ * sizeof(float));
+  if (padded_dim_ > dim_) {
+    std::memset(out + dim_, 0, (padded_dim_ - dim_) * sizeof(float));
+  }
   ApplySigns(out, signs_.data(), padded_dim_);
   HadamardTransform(out, padded_dim_);
 }
 
-void Rotator::ApplyInverse(const float* y, float* out_dim) const {
-  if (tls_inv_tmp.size() < padded_dim_) tls_inv_tmp.resize(padded_dim_);
-  float* tmp = tls_inv_tmp.data();
-  std::memcpy(tmp, y, padded_dim_ * sizeof(float));
+void Rotator::ApplyInverse(float* y_padded, float* out_dim) const {
   // H is symmetric & orthogonal in this normalization; D is its own inverse.
-  // y = H D x  =>  x = D H y  (apply H then sign flip).
-  HadamardTransform(tmp, padded_dim_);
-  ApplySigns(tmp, signs_.data(), padded_dim_);
-  for (size_t i = 0; i < dim_; ++i) out_dim[i] = tmp[i];
+  // y = H D x  =>  x = D H y. We run the unscaled WHT and then a single SIMD
+  // pass that combines the sign flip with the 1/sqrt(padded_dim) normalization
+  // (saving one pass over y_padded compared to running each in turn).
+  FastHadamardTransformUnscaled(y_padded, padded_dim_);
+  const float inv_sqrt_pd = 1.0f / std::sqrt(static_cast<float>(padded_dim_));
+  ApplySignsAndScale(y_padded, signs_.data(), padded_dim_, inv_sqrt_pd);
+  std::memcpy(out_dim, y_padded, dim_ * sizeof(float));
 }
 
 void Quantize(const Rotator& rot, QuantBits bits, const float* x,
@@ -104,8 +103,7 @@ void Quantize(const Rotator& rot, QuantBits bits, const float* x,
     QuantizeAffine(rotated, pd, scale, zp, max_code, codes);
   }
 
-  // Header: scale (LE float32) + 12 bytes reserved zeros.
-  std::memset(payload_out, 0, kHeaderBytes);
+  // Header: just the scale (LE float32).
   std::memcpy(payload_out, &scale, sizeof(float));
 
   // Packed codes.
@@ -132,32 +130,6 @@ void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
     DequantizeAffine(codes, pd, scale, zp, rotated);
   }
   rot.ApplyInverse(rotated, x_out);
-}
-
-void RotateQuery(const Rotator& rot, const float* q, float* q_rot_out) {
-  rot.Apply(q, q_rot_out);
-}
-
-AdcStats AdcScore(const Rotator& rot, QuantBits bits, const float* q_rot,
-                  const uint8_t* payload) {
-  const size_t pd = rot.padded_dim();
-  float scale;
-  std::memcpy(&scale, payload, sizeof(float));
-
-  AdcUnscaled u =
-      AdcUnscaledScore(payload + kHeaderBytes, pd, bits, q_rot);
-
-  AdcStats out;
-  if (Bits(bits) == 1) {
-    // Levels are +/-1, so the per-level scale enters once for dot and
-    // squared for norm2 (each level^2 = 1 -> norm2_unscaled = pd).
-    out.dot = scale * u.dot;
-    out.decoded_norm2 = scale * scale * u.norm2;
-  } else {
-    out.dot = scale * u.dot;
-    out.decoded_norm2 = scale * scale * u.norm2;
-  }
-  return out;
 }
 
 }  // namespace turboquant

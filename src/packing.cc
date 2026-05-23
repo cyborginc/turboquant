@@ -27,23 +27,6 @@ void PackBitstream(const uint16_t* codes, size_t n, int bits, uint8_t* out) {
   }
 }
 
-void UnpackBitstream(const uint8_t* in, size_t n, int bits, uint16_t* codes) {
-  const uint32_t mask = (1u << bits) - 1u;
-  for (size_t i = 0; i < n; ++i) {
-    const size_t bit_off = i * static_cast<size_t>(bits);
-    const size_t byte_off = bit_off >> 3;
-    const int shift = static_cast<int>(bit_off & 7);
-    uint32_t v = static_cast<uint32_t>(in[byte_off]);
-    if (shift + bits > 8) {
-      v |= static_cast<uint32_t>(in[byte_off + 1]) << 8;
-      if (shift + bits > 16) {
-        v |= static_cast<uint32_t>(in[byte_off + 2]) << 16;
-      }
-    }
-    codes[i] = static_cast<uint16_t>((v >> shift) & mask);
-  }
-}
-
 }  // namespace
 
 void PackCodes(const uint16_t* codes, size_t n, QuantBits bits, uint8_t* out) {
@@ -108,6 +91,68 @@ void PackCodes(const uint16_t* codes, size_t n, QuantBits bits, uint8_t* out) {
   }
 }
 
+namespace {
+
+// 8 codes occupy 48 bits = 6 bytes. The bulk loop loads 8 bytes per iter
+// (reading 2 bytes more than needed); the scalar tail handles the last group
+// when an 8-byte load would walk past the packed buffer.
+void UnpackB6(const uint8_t* in, size_t n, uint16_t* codes) {
+  const size_t tot_bytes = (n * 6 + 7) / 8;
+  size_t i = 0;
+  while (i + 8 <= n) {
+    const size_t byte_off = 6 * (i / 8);
+    if (byte_off + 8 > tot_bytes) break;
+    uint64_t v;
+    std::memcpy(&v, in + byte_off, 8);
+    codes[i + 0] = static_cast<uint16_t>((v >> 0) & 0x3F);
+    codes[i + 1] = static_cast<uint16_t>((v >> 6) & 0x3F);
+    codes[i + 2] = static_cast<uint16_t>((v >> 12) & 0x3F);
+    codes[i + 3] = static_cast<uint16_t>((v >> 18) & 0x3F);
+    codes[i + 4] = static_cast<uint16_t>((v >> 24) & 0x3F);
+    codes[i + 5] = static_cast<uint16_t>((v >> 30) & 0x3F);
+    codes[i + 6] = static_cast<uint16_t>((v >> 36) & 0x3F);
+    codes[i + 7] = static_cast<uint16_t>((v >> 42) & 0x3F);
+    i += 8;
+  }
+  for (; i < n; ++i) {
+    const size_t bit_off = i * 6;
+    const size_t byte_off = bit_off >> 3;
+    const int shift = static_cast<int>(bit_off & 7);
+    uint32_t v32 = in[byte_off];
+    if (shift + 6 > 8) v32 |= static_cast<uint32_t>(in[byte_off + 1]) << 8;
+    codes[i] = static_cast<uint16_t>((v32 >> shift) & 0x3F);
+  }
+}
+
+// 4 codes occupy 48 bits = 6 bytes. Same idea: u64 load gives 4 codes.
+void UnpackB12(const uint8_t* in, size_t n, uint16_t* codes) {
+  const size_t tot_bytes = (n * 12 + 7) / 8;
+  size_t i = 0;
+  while (i + 4 <= n) {
+    const size_t byte_off = 6 * (i / 4);
+    if (byte_off + 8 > tot_bytes) break;
+    uint64_t v;
+    std::memcpy(&v, in + byte_off, 8);
+    codes[i + 0] = static_cast<uint16_t>((v >> 0) & 0xFFF);
+    codes[i + 1] = static_cast<uint16_t>((v >> 12) & 0xFFF);
+    codes[i + 2] = static_cast<uint16_t>((v >> 24) & 0xFFF);
+    codes[i + 3] = static_cast<uint16_t>((v >> 36) & 0xFFF);
+    i += 4;
+  }
+  for (; i < n; ++i) {
+    const size_t bit_off = i * 12;
+    const size_t byte_off = bit_off >> 3;
+    const int shift = static_cast<int>(bit_off & 7);
+    uint32_t v32 = static_cast<uint32_t>(in[byte_off]) |
+                   (static_cast<uint32_t>(in[byte_off + 1]) << 8);
+    if (shift + 12 > 16)
+      v32 |= static_cast<uint32_t>(in[byte_off + 2]) << 16;
+    codes[i] = static_cast<uint16_t>((v32 >> shift) & 0xFFF);
+  }
+}
+
+}  // namespace
+
 void UnpackCodes(const uint8_t* in, size_t n, QuantBits bits, uint16_t* codes) {
   switch (bits) {
     case QuantBits::B8: {
@@ -160,8 +205,10 @@ void UnpackCodes(const uint8_t* in, size_t n, QuantBits bits, uint16_t* codes) {
       return;
     }
     case QuantBits::B6:
+      UnpackB6(in, n, codes);
+      return;
     case QuantBits::B12:
-      UnpackBitstream(in, n, static_cast<int>(bits), codes);
+      UnpackB12(in, n, codes);
       return;
   }
 }

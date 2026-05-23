@@ -1,15 +1,15 @@
 # turboquant
 
 A C++17 library implementing the TurboQuant raw-vector quantization scheme.
-Three operations are exposed:
+The public surface is:
 
 - `Quantize(rot, bits, x, payload)` — rotate + quantize a float vector to a
   packed per-vector payload.
 - `Dequantize(rot, bits, payload, x)` — recover an approximation of the
   original float vector.
-- `AdcScore(rot, bits, q_rot, payload)` — compute approximate dot product and
-  decoded squared L2 norm directly from packed codes, without materializing
-  floats.
+- `DequantizeFast(rot, bits, payload, x)` — same contract, but fuses the
+  small-stride WHT stages in-register and combines the inverse sign-flip with
+  the normalization into a single SIMD pass.
 
 `turboquant.h` is the only public header. Internally the hot paths use
 [Google Highway](https://github.com/google/highway) with dynamic dispatch, so a
@@ -22,7 +22,7 @@ NEON / SVE / ...).
 include/turboquant/turboquant.h   Public API
 src/turboquant.cc                 API glue, payload write
 src/rotation.{h,cc}               Walsh-Hadamard + sign-flip rotation (SIMD)
-src/kernels.{h,cc}                Quant/dequant/ADC inner loops (SIMD)
+src/kernels.{h,cc}                Quant/dequant inner loops (SIMD)
 src/packing.{h,cc}                Bit packing per the spec
 tests/                            GoogleTest unit tests
 bench/bench_micro.cc              google-benchmark microbenchmarks
@@ -44,20 +44,15 @@ normalized Walsh-Hadamard transform. The transform preserves L2 norm and inner
 products (`<x, y> = <H D pad(x), H D pad(y)>`), so the rotated coordinates can
 be quantized independently with much better behavior than the raw axes.
 
-`Quantize` and `RotateQuery` apply the forward rotation. `Dequantize` applies
-the inverse (`D * H * y`) and crops to the original `dim`. `AdcScore` operates
-directly on the rotated codes, so the caller must pre-rotate the query once via
-`RotateQuery`.
+`Quantize` applies the forward rotation. `Dequantize` and `DequantizeFast`
+apply the inverse (`D * H * y`) and crop to the original `dim`.
 
 ## Payload format
-
-Per the spec:
 
 ```
 offset  size    field
 0       4       scale (IEEE-754 float32, little-endian)
-4       12      reserved/padding (zero)
-16      N       packed codes, N = ceil(padded_dim * bits / 8)
+4       N       packed codes, N = ceil(padded_dim * bits / 8)
 ```
 
 Codes are a little-endian bitstream: code `i` occupies bits `[i*bits, (i+1)*bits)`
@@ -114,13 +109,17 @@ turboquant::Quantize(rot, turboquant::QuantBits::B8, x.data(), payload.data());
 std::vector<float> q_rot(rot.padded_dim());
 turboquant::RotateQuery(rot, q.data(), q_rot.data());
 
-// Hot loop: score the query against many quantized payloads.
-auto stats = turboquant::AdcScore(rot, turboquant::QuantBits::B8, q_rot.data(),
-                                  payload.data());
-// stats.dot           ~= <q, x>
-// stats.decoded_norm2 ~= <x_hat, x_hat>
-// l2_squared          = ||q||^2 + stats.decoded_norm2 - 2 * stats.dot
-// cosine              = stats.dot * (1 / ||q||) * rsqrt(stats.decoded_norm2)
+// Hot path: score the query against a batch of payloads in a single call.
+// (Pass n=1 for a single payload.) `payloads` is a contiguous array of
+// `n_base` payloads each PayloadSize bytes long.
+const size_t ps = turboquant::PayloadSize(kDim, turboquant::QuantBits::B8);
+std::vector<turboquant::AdcStats> stats(n_base);
+turboquant::AdcScore(rot, turboquant::QuantBits::B8, q_rot.data(),
+                     payloads.data(), ps, n_base, stats.data());
+// stats[i].dot           ~= <q, x_i>
+// stats[i].decoded_norm2 ~= <x_hat_i, x_hat_i>
+// l2_squared             = ||q||^2 + stats[i].decoded_norm2 - 2 * stats[i].dot
+// cosine                 = stats[i].dot * (1 / ||q||) * rsqrt(stats[i].decoded_norm2)
 ```
 
 ## Dataset benchmark
@@ -200,14 +199,12 @@ b12 (deq+BLAS)      1173.32        85.23     0.9990        8.40x  (1045ms deq + 
   per-batch dequant step adds ~0.7s on SIFT-1M before the matmul even
   starts. The trade is memory footprint: the quantized base is 4×–32×
   smaller than the float32 base.
-- **Current ADC is much slower than `deq+BLAS`** in this brute-force
-  scoring setup. The reason is that the Highway dynamic-dispatch
-  thunk fires on every call and each call only does
-  `padded_dim` lanes of work (32 lanes on glove, 128 on SIFT), so per-call
-  overhead dominates. The natural fix is a batched ADC API (one rotated query
-  × many packed payloads per call) which would amortize the dispatch and let
-  the inner loop run a tight SIMD reduction — that wasn't part of this
-  iteration but is the obvious next step if ADC ends up on a hot path.
+- The earlier per-vector ADC API paid Highway's dynamic-dispatch cost on
+  every call, which dominated runtime at `padded_dim` ≤ 128. The current API
+  is **batched by default** (`AdcScore(..., payloads, stride, n, out)`): one
+  dispatch covers `n` payloads, so the inner SIMD FMA / norm-accumulator is
+  what's measured rather than the thunk. The numbers above were captured
+  before that change and will be re-run.
 - **The point of ADC isn't to beat sgemm at brute-force**; it's that the
   base never has to be materialized as floats. ADC is the natural kernel for
   cases where the float base doesn't fit in RAM/cache, for streaming /

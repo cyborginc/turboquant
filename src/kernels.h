@@ -27,18 +27,6 @@ void DequantizeAffine(const uint16_t* codes, size_t n, float scale,
 void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
                       float* data_out);
 
-// Unpacks the payload's packed codes and computes (sum q*level, sum level*level)
-// without the per-vector scale. Caller multiplies by scale/scale^2.
-//
-// `bits` selects the unpack/level mapping. `padded_dim` is the count of codes.
-// `q_rot` is the rotated query of length `padded_dim`.
-struct AdcUnscaled {
-  float dot;
-  float norm2;
-};
-AdcUnscaled AdcUnscaledScore(const uint8_t* packed_codes, size_t padded_dim,
-                             QuantBits bits, const float* q_rot);
-
 }  // namespace turboquant
 
 #endif  // TURBOQUANT_SRC_KERNELS_H_

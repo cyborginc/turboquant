@@ -89,7 +89,7 @@ INSTANTIATE_TEST_SUITE_P(AllBitWidths, RoundtripTest,
                                            QuantBits::B4, QuantBits::B6,
                                            QuantBits::B8, QuantBits::B12));
 
-TEST(Roundtrip, PayloadHeaderIsScaleAndZeros) {
+TEST(Roundtrip, PayloadHeaderIsScale) {
   const size_t dim = 96;
   Rotator R(dim, 1);
   std::mt19937_64 rng(0xABCD0002);
@@ -103,7 +103,8 @@ TEST(Roundtrip, PayloadHeaderIsScaleAndZeros) {
   float scale;
   std::memcpy(&scale, payload.data(), sizeof(float));
   EXPECT_GT(scale, 0.0f);
-  for (size_t i = 4; i < 16; ++i) EXPECT_EQ(payload[i], 0) << "i=" << i;
+  // PayloadSize is 4 (scale) + ceil(padded_dim * bits / 8).
+  EXPECT_EQ(PayloadSize(dim, QuantBits::B8), 4u + 128u);
 }
 
 TEST(Roundtrip, NonPowerOf2Dim) {
