@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace turboquant {
 namespace {
@@ -113,6 +114,19 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
     if (max_change < kTol) break;
   }
 
+  // Beta(a, a) is symmetric around 0; Lloyd-Max iteration should preserve this
+  // but floating-point error can let small asymmetries accumulate. Force
+  // exact symmetry — important for the branch-free encode below, which relies
+  // on it.
+  if (num_levels >= 2) {
+    for (size_t i = 0; i < num_levels / 2; ++i) {
+      const double mag =
+          0.5 * (centroids[num_levels - 1 - i] - centroids[i]);
+      centroids[i] = -mag;
+      centroids[num_levels - 1 - i] = mag;
+    }
+  }
+
   // Final boundaries are the midpoints between consecutive centroids.
   boundaries_.resize(num_levels > 0 ? num_levels - 1 : 0);
   for (size_t i = 0; i + 1 < num_levels; ++i) {
@@ -121,6 +135,25 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
   centroids_.resize(num_levels);
   for (size_t i = 0; i < num_levels; ++i) {
     centroids_[i] = static_cast<float>(centroids[i]);
+  }
+
+  // Positive-half boundaries, padded to a power of two with +inf at the tail
+  // so a branch-free binary search can compare against any index in [0, half)
+  // without bounds checks.
+  //
+  // For num_levels = 2^bits, the middle boundary at index num_levels/2 - 1 is
+  // exactly 0 (by symmetry) and is implicit in the encode — we work with
+  // |x| against the strictly-positive boundaries
+  //   boundaries[num_levels/2 ... num_levels - 2]
+  // which has length num_levels/2 - 1. Pad to num_levels/2 with +inf.
+  if (num_levels >= 2) {
+    const size_t half = num_levels / 2;
+    pos_bounds_pad_.assign(half, std::numeric_limits<float>::infinity());
+    for (size_t i = 0; i + 1 < half; ++i) {
+      pos_bounds_pad_[i] = boundaries_[half + i];
+    }
+  } else {
+    pos_bounds_pad_.assign(1, std::numeric_limits<float>::infinity());
   }
 }
 

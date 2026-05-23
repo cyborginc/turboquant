@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "codebook.h"
+#include "internal.h"
 #include "kernels.h"
 #include "packing.h"
 #include "rotation.h"
@@ -57,12 +58,12 @@ Rotator::Rotator(size_t dim, uint64_t seed)
     const uint64_t r = SplitMix64(s);
     signs_[i] = (r & 1ULL) ? 1.0f : -1.0f;
   }
-  // Build Beta codebooks for all supported bit widths (B12 skipped — 4096
-  // levels makes both the Lloyd-Max construction and the per-coord encode
-  // expensive enough not to be useful at this scope).
+  // Build Beta codebooks for all supported bit widths. The branch-free
+  // binary-search encode keeps b8 and b12 tractable (O(bits) compares per
+  // coord instead of O(2^bits)).
   beta_codebooks_.resize(13);  // indexed by Bits(QuantBits); only some slots filled.
-  for (QuantBits b : {QuantBits::B1, QuantBits::B2, QuantBits::B4,
-                      QuantBits::B6, QuantBits::B8}) {
+  for (QuantBits b : {QuantBits::B1, QuantBits::B2, QuantBits::B3, QuantBits::B4,
+                      QuantBits::B6, QuantBits::B8, QuantBits::B12}) {
     const int bi = Bits(b);
     beta_codebooks_[bi] = std::make_unique<BetaCodebook>(b, padded_dim_);
   }
@@ -97,8 +98,10 @@ void Rotator::ApplyInverse(float* y_padded, float* out_dim) const {
   std::memcpy(out_dim, y_padded, dim_ * sizeof(float));
 }
 
-void Quantize(const Rotator& rot, QuantBits bits, const float* x,
-              uint8_t* payload_out) {
+namespace internal {
+
+void QuantizeAffine(const Rotator& rot, QuantBits bits, const float* x,
+                    uint8_t* payload_out) {
   const size_t pd = rot.padded_dim();
   if (tls_rotated.size() < pd) tls_rotated.resize(pd);
   if (tls_codes.size() < pd) tls_codes.resize(pd);
@@ -110,22 +113,19 @@ void Quantize(const Rotator& rot, QuantBits bits, const float* x,
 
   float scale;
   if (b == 1) {
-    const float m = MaxAbs(rotated, pd);
+    const float m = ::turboquant::MaxAbs(rotated, pd);
     scale = m > 0.0f ? m : 1.0f;
-    QuantizeBinary(rotated, pd, codes);
+    ::turboquant::QuantizeBinary(rotated, pd, codes);
   } else {
     const int max_pos = (1 << (b - 1)) - 1;
     const int zp = 1 << (b - 1);
     const int max_code = (1 << b) - 1;
-    const float m = MaxAbs(rotated, pd);
+    const float m = ::turboquant::MaxAbs(rotated, pd);
     scale = m > 0.0f ? m / static_cast<float>(max_pos) : 1.0f;
-    QuantizeAffine(rotated, pd, scale, zp, max_code, codes);
+    ::turboquant::QuantizeAffine(rotated, pd, scale, zp, max_code, codes);
   }
 
-  // Header: just the scale (LE float32).
   std::memcpy(payload_out, &scale, sizeof(float));
-
-  // Packed codes.
   PackCodes(codes, pd, bits, payload_out + kHeaderBytes);
 }
 
@@ -153,8 +153,9 @@ void QuantizeBeta(const Rotator& rot, QuantBits bits, const float* x,
   // already-padded buffer (skip the memcpy into rotated[] that Apply does).
   ForwardRotate(rotated, rot.signs(), pd);
 
-  // Encode each rotated coord to its Lloyd-Max code.
-  EncodeBetaCodebook(rotated, pd, cb->boundaries(), cb->num_boundaries(), codes);
+  // Encode each rotated coord to its Lloyd-Max code via branch-free symmetric
+  // binary search.
+  EncodeBetaCodebook(rotated, pd, cb->positive_boundaries_padded(), bits, codes);
 
   // scale = ||v|| / <u_rot, x_hat>. Falls back to ||v|| if the inner product
   // degenerates (e.g., zero vector).
@@ -188,8 +189,8 @@ void DequantizeBeta(const Rotator& rot, QuantBits bits, const uint8_t* payload,
   rot.ApplyInverse(rotated, x_out);
 }
 
-void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
-                float* x_out) {
+void DequantizeAffine(const Rotator& rot, QuantBits bits,
+                      const uint8_t* payload, float* x_out) {
   const size_t pd = rot.padded_dim();
   float scale;
   std::memcpy(&scale, payload, sizeof(float));
@@ -202,12 +203,52 @@ void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
 
   const int b = Bits(bits);
   if (b == 1) {
-    DequantizeBinary(codes, pd, scale, rotated);
+    ::turboquant::DequantizeBinary(codes, pd, scale, rotated);
   } else {
     const int zp = 1 << (b - 1);
-    DequantizeAffine(codes, pd, scale, zp, rotated);
+    ::turboquant::DequantizeAffine(codes, pd, scale, zp, rotated);
   }
   rot.ApplyInverse(rotated, x_out);
+}
+
+}  // namespace internal
+
+// Auto-route based on bit width. The Beta-codebook path improves recall
+// dramatically at low bits (b1/b2/b3/b4/b6); the affine path is equivalent
+// at b8/b12 and faster to encode.
+namespace {
+bool UseBetaPath(QuantBits bits) {
+  switch (bits) {
+    case QuantBits::B1:
+    case QuantBits::B2:
+    case QuantBits::B3:
+    case QuantBits::B4:
+    case QuantBits::B6:
+      return true;
+    case QuantBits::B8:
+    case QuantBits::B12:
+      return false;
+  }
+  return false;
+}
+}  // namespace
+
+void Quantize(const Rotator& rot, QuantBits bits, const float* x,
+              uint8_t* payload_out) {
+  if (UseBetaPath(bits)) {
+    internal::QuantizeBeta(rot, bits, x, payload_out);
+  } else {
+    internal::QuantizeAffine(rot, bits, x, payload_out);
+  }
+}
+
+void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
+                float* x_out) {
+  if (UseBetaPath(bits)) {
+    internal::DequantizeBeta(rot, bits, payload, x_out);
+  } else {
+    internal::DequantizeAffine(rot, bits, payload, x_out);
+  }
 }
 
 }  // namespace turboquant

@@ -7,13 +7,15 @@
 
 #include "turboquant/turboquant.h"
 
+#include "internal.h"
+
 using turboquant::Dequantize;
-using turboquant::DequantizeBeta;
 using turboquant::PayloadSize;
 using turboquant::QuantBits;
 using turboquant::Quantize;
-using turboquant::QuantizeBeta;
 using turboquant::Rotator;
+using turboquant::internal::DequantizeBeta;
+using turboquant::internal::QuantizeBeta;
 
 namespace {
 
@@ -62,20 +64,23 @@ TEST_P(RoundtripTest, MseDecreasesWithBits) {
   // SNR ~ var/mse should rise sharply with bit width.
   const double snr = var / std::max(mse, 1e-30);
   // Loose lower bounds; just sanity-check the trend.
+  // Quantize/Dequantize auto-route by bit width (beta for b1/2/3/4/6, affine
+  // for b8/12). The SNR floors below cover both paths conservatively.
   switch (bits) {
     case QuantBits::B1:
-      // 1-bit uses scale=max_abs (per spec, ADC-friendly not MSE-optimal),
-      // so per-element MSE is large — just check we beat random reconstruction.
-      EXPECT_GT(snr, 0.05);
+      EXPECT_GT(snr, 0.3);
       break;
     case QuantBits::B2:
       EXPECT_GT(snr, 1.5);
       break;
+    case QuantBits::B3:
+      EXPECT_GT(snr, 6.0);
+      break;
     case QuantBits::B4:
-      EXPECT_GT(snr, 50.0);
+      EXPECT_GT(snr, 30.0);
       break;
     case QuantBits::B6:
-      EXPECT_GT(snr, 500.0);
+      EXPECT_GT(snr, 200.0);
       break;
     case QuantBits::B8:
       EXPECT_GT(snr, 5000.0);
@@ -88,8 +93,9 @@ TEST_P(RoundtripTest, MseDecreasesWithBits) {
 
 INSTANTIATE_TEST_SUITE_P(AllBitWidths, RoundtripTest,
                          ::testing::Values(QuantBits::B1, QuantBits::B2,
-                                           QuantBits::B4, QuantBits::B6,
-                                           QuantBits::B8, QuantBits::B12));
+                                           QuantBits::B3, QuantBits::B4,
+                                           QuantBits::B6, QuantBits::B8,
+                                           QuantBits::B12));
 
 TEST(Roundtrip, PayloadHeaderIsScale) {
   const size_t dim = 96;
@@ -138,17 +144,19 @@ TEST_P(BetaRoundtripTest, MseDecreasesWithBits) {
   switch (bits) {
     case QuantBits::B1: EXPECT_GT(snr, 0.3); break;
     case QuantBits::B2: EXPECT_GT(snr, 1.5); break;
+    case QuantBits::B3: EXPECT_GT(snr, 6.0); break;
     case QuantBits::B4: EXPECT_GT(snr, 30.0); break;
     case QuantBits::B6: EXPECT_GT(snr, 200.0); break;
     case QuantBits::B8: EXPECT_GT(snr, 1000.0); break;
-    case QuantBits::B12: break;  // B12 not supported by Beta path.
+    case QuantBits::B12: EXPECT_GT(snr, 1e4); break;
   }
 }
 
 INSTANTIATE_TEST_SUITE_P(BetaWidths, BetaRoundtripTest,
                          ::testing::Values(QuantBits::B1, QuantBits::B2,
-                                           QuantBits::B4, QuantBits::B6,
-                                           QuantBits::B8));
+                                           QuantBits::B3, QuantBits::B4,
+                                           QuantBits::B6, QuantBits::B8,
+                                           QuantBits::B12));
 
 TEST(Roundtrip, NonPowerOf2Dim) {
   const size_t dim = 100;

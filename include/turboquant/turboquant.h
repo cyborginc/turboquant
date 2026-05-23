@@ -13,6 +13,7 @@ class BetaCodebook;  // Private; defined in src/codebook.h.
 enum class QuantBits : uint8_t {
   B1 = 1,
   B2 = 2,
+  B3 = 3,
   B4 = 4,
   B6 = 6,
   B8 = 8,
@@ -66,35 +67,19 @@ class Rotator {
   std::vector<std::unique_ptr<BetaCodebook>> beta_codebooks_;
 };
 
-// Encode `x` (length rot.dim()) into `payload_out` (PayloadSize(rot.dim(), bits) bytes).
-// Internally rotates x with `rot` then quantizes to `bits`.
+// Encode `x` (length rot.dim()) into `payload_out` (PayloadSize(rot.dim(), bits)
+// bytes). Internally picks the best-known quantization scheme for the chosen
+// bit width: a Lloyd-Max codebook over the Beta distribution induced by the
+// rotation for low bits (B1/B2/B3/B4/B6, where it dramatically improves recall),
+// or affine min/max quantization for high bits (B8/B12, where the two schemes
+// are equivalent and affine is cheaper to encode).
 void Quantize(const Rotator& rot, QuantBits bits, const float* x,
               uint8_t* payload_out);
 
 // Decode `payload` back to the original-dimension vector `x_out` (length
-// rot.dim()). Applies the inverse rotation using:
-//   - an unrolled u64-load bitstream unpack for B6/B12;
-//   - a Walsh-Hadamard kernel that fuses the small-stride stages in-register;
-//   - a single SIMD pass that combines the post-WHT sign flip and the
-//     1/sqrt(padded_dim) normalization.
+// rot.dim()). Routing matches Quantize.
 void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
                 float* x_out);
-
-// Beta-codebook variant of Quantize/Dequantize.
-//   - Unit-normalize x, then rotate.
-//   - Encode each rotated coord via the Lloyd-Max codebook for
-//     Beta((padded_dim-1)/2, (padded_dim-1)/2) — levels live where the
-//     distribution's mass actually is, instead of uniformly spaced.
-//   - Store scale = ||v|| / <u_rot, x_hat>: a length-renormalized scale
-//     that makes the inner-product estimator <q, v_hat> ≈ <q, v> unbiased.
-// Output payload uses the same header + packed-codes layout as Quantize, so
-// PayloadSize is unchanged. Currently supported for B1, B2, B4, B6, B8.
-// QuantizeBeta with B12 will return without writing (rot.beta_codebook
-// returns nullptr).
-void QuantizeBeta(const Rotator& rot, QuantBits bits, const float* x,
-                  uint8_t* payload_out);
-void DequantizeBeta(const Rotator& rot, QuantBits bits, const uint8_t* payload,
-                    float* x_out);
 
 }  // namespace turboquant
 

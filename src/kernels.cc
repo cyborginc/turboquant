@@ -95,36 +95,66 @@ void DequantizeBinaryImpl(const uint16_t* codes, size_t n, float scale,
   }
 }
 
-// Encode by counting how many boundaries each value exceeds. Outer loop over
-// boundaries keeps the per-lane code accumulator register-resident; inner loop
-// is SIMD over the n input values.
-void EncodeBetaCodebookImpl(const float* values, size_t n,
-                            const float* boundaries, size_t num_boundaries,
-                            uint16_t* codes_out) {
-  const hn::ScalableTag<float> df;
-  const hn::Rebind<int32_t, decltype(df)> di32;
-  const hn::Rebind<uint16_t, decltype(df)> du16;
-  const size_t lanes = hn::Lanes(df);
-  const auto v_one = hn::Set(di32, 1);
-  const auto v_zero_i32 = hn::Zero(di32);
-
-  size_t i = 0;
-  for (; i + lanes <= n; i += lanes) {
-    auto v_codes = hn::Zero(di32);
-    const auto vx = hn::LoadU(df, values + i);
-    for (size_t k = 0; k < num_boundaries; ++k) {
-      const auto vb = hn::Set(df, boundaries[k]);
-      const auto m32 = hn::RebindMask(di32, hn::Gt(vx, vb));
-      v_codes = hn::Add(v_codes, hn::IfThenElse(m32, v_one, v_zero_i32));
-    }
-    hn::StoreU(hn::DemoteTo(du16, v_codes), du16, codes_out + i);
+// Branch-free symmetric binary-search encode. For a Beta codebook of
+// 2^Bits levels (symmetric around 0), we run a binary search on the
+// positive-half boundaries (length 2^(Bits-1), padded with +inf), then
+// fold the sign back in. Per-coord work: Bits-1 dependent compares.
+//
+// pos_bounds_pad is L1-resident (≤ 2 KB at Bits=12). The compiler unrolls
+// the template loop fully because the step values are constexpr.
+template <int Bits>
+HWY_INLINE int EncodeBetaSymBranchFree(float x, const float* pos_bounds_pad) {
+  static_assert(Bits >= 1 && Bits <= 12, "Beta encode supports b1..b12");
+  constexpr int kHalf = 1 << (Bits - 1);
+  const float abs_x = std::fabs(x);
+  int sub_code = 0;
+  // Fixed-depth binary search. Tree probe at position (sub_code + step - 1).
+  for (int step = kHalf >> 1; step > 0; step >>= 1) {
+    const float bnd = pos_bounds_pad[sub_code + step - 1];
+    sub_code += (abs_x > bnd) ? step : 0;
   }
-  for (; i < n; ++i) {
-    int c = 0;
-    for (size_t k = 0; k < num_boundaries; ++k) {
-      if (values[i] > boundaries[k]) ++c;
-    }
-    codes_out[i] = static_cast<uint16_t>(c);
+  // sub_code is in [0, kHalf). Fold sign back: positive x maps to upper half,
+  // negative x mirrors into the lower half.
+  return (x >= 0.0f) ? (kHalf + sub_code) : (kHalf - 1 - sub_code);
+}
+
+template <int Bits>
+void EncodeBetaCodebookN(const float* values, size_t n,
+                         const float* pos_bounds_pad, uint16_t* codes_out) {
+  // Scalar per coord. The compiler pipelines many coords' independent binary
+  // searches through OoO scheduling; SIMD-batched binary search would require
+  // gather (scarce on NEON) so we leave that on the table.
+  for (size_t i = 0; i < n; ++i) {
+    codes_out[i] = static_cast<uint16_t>(
+        EncodeBetaSymBranchFree<Bits>(values[i], pos_bounds_pad));
+  }
+}
+
+void EncodeBetaCodebookImpl(const float* values, size_t n,
+                            const float* pos_bounds_pad, QuantBits bits,
+                            uint16_t* codes_out) {
+  switch (bits) {
+    case QuantBits::B1:
+      EncodeBetaCodebookN<1>(values, n, pos_bounds_pad, codes_out);
+      return;
+    case QuantBits::B2:
+      EncodeBetaCodebookN<2>(values, n, pos_bounds_pad, codes_out);
+      return;
+    case QuantBits::B3:
+      EncodeBetaCodebookN<3>(values, n, pos_bounds_pad, codes_out);
+      return;
+    case QuantBits::B4:
+      EncodeBetaCodebookN<4>(values, n, pos_bounds_pad, codes_out);
+      return;
+    case QuantBits::B6:
+      EncodeBetaCodebookN<6>(values, n, pos_bounds_pad, codes_out);
+      return;
+    case QuantBits::B8:
+      EncodeBetaCodebookN<8>(values, n, pos_bounds_pad, codes_out);
+      return;
+    case QuantBits::B12:
+      EncodeBetaCodebookN<12>(values, n, pos_bounds_pad, codes_out);
+      return;
   }
 }
 
@@ -206,10 +236,11 @@ void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
                       float* data_out) {
   HWY_DYNAMIC_DISPATCH(DequantizeBinaryImpl)(codes, n, scale, data_out);
 }
-void EncodeBetaCodebook(const float* values, size_t n, const float* boundaries,
-                        size_t num_boundaries, uint16_t* codes_out) {
-  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)(values, n, boundaries,
-                                               num_boundaries, codes_out);
+void EncodeBetaCodebook(const float* values, size_t n,
+                        const float* pos_bounds_pad, QuantBits bits,
+                        uint16_t* codes_out) {
+  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)(values, n, pos_bounds_pad, bits,
+                                               codes_out);
 }
 void DecodeBetaCodebook(const uint16_t* codes, size_t n, const float* centroids,
                         float scale, float* data_out) {

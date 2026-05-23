@@ -49,13 +49,14 @@ inline void Fp16ToFp32(const uint16_t* src, size_t n, float* dst) {
 #include <vector>
 
 #include "turboquant/turboquant.h"
+// Internal helpers for explicit affine-vs-beta benchmarking (not shipped in
+// the public surface).
+#include "internal.h"
 
 namespace {
 
 using turboquant::PayloadSize;
 using turboquant::QuantBits;
-using turboquant::Quantize;
-using turboquant::QuantizeBeta;
 using turboquant::Rotator;
 
 struct Dataset {
@@ -246,10 +247,12 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
               "MB/s_quantized");
 
   Rotator R(ds.dim, 0x12345);
-  const QuantBits bits_list[] = {QuantBits::B1, QuantBits::B2, QuantBits::B4,
-                                 QuantBits::B6, QuantBits::B8, QuantBits::B12};
-  std::vector<std::vector<uint8_t>> all_payloads(6);
-  std::vector<size_t> payload_sizes(6);
+  const QuantBits bits_list[] = {QuantBits::B1, QuantBits::B2, QuantBits::B3,
+                                 QuantBits::B4, QuantBits::B6, QuantBits::B8,
+                                 QuantBits::B12};
+  constexpr int kNumBits = sizeof(bits_list) / sizeof(bits_list[0]);
+  std::vector<std::vector<uint8_t>> all_payloads(kNumBits);
+  std::vector<size_t> payload_sizes(kNumBits);
   double t_baseline_copy = 0;
   {
     const double t0 = Now();
@@ -276,33 +279,32 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 (ds.n_train * ds.dim * 2) / 1e6 / dt);
   }
 #endif
-  for (int bi = 0; bi < 6; ++bi) {
+  for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = PayloadSize(ds.dim, b);
     payload_sizes[bi] = ps;
     all_payloads[bi].assign(ps * ds.n_train, 0);
     const double t0 = Now();
     for (size_t i = 0; i < ds.n_train; ++i) {
-      Quantize(R, b, ds.train.data() + i * ds.dim,
-               all_payloads[bi].data() + i * ps);
+      turboquant::internal::QuantizeAffine(R, b, ds.train.data() + i * ds.dim,
+                                           all_payloads[bi].data() + i * ps);
     }
     const double dt = Now() - t0;
     std::printf("%-8s b%-7d %15.2f %15.2f\n", "affine",
                 static_cast<int>(b), 1000.0 * dt,
                 (ds.n_train * ps) / 1e6 / dt);
   }
-  // Beta variant ingest (B1..B8; B12 not supported by the Beta path).
-  std::vector<std::vector<uint8_t>> all_payloads_beta(6);
-  const bool beta_supported[6] = {true, true, true, true, true, false};
-  for (int bi = 0; bi < 6; ++bi) {
-    if (!beta_supported[bi]) continue;
+  // Beta variant ingest (all bit widths — branch-free binary search keeps
+  // b8/b12 tractable).
+  std::vector<std::vector<uint8_t>> all_payloads_beta(kNumBits);
+  for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
     all_payloads_beta[bi].assign(ps * ds.n_train, 0);
     const double t0 = Now();
     for (size_t i = 0; i < ds.n_train; ++i) {
-      QuantizeBeta(R, b, ds.train.data() + i * ds.dim,
-                   all_payloads_beta[bi].data() + i * ps);
+      turboquant::internal::QuantizeBeta(R, b, ds.train.data() + i * ds.dim,
+                                         all_payloads_beta[bi].data() + i * ps);
     }
     const double dt = Now() - t0;
     std::printf("%-8s b%-7d %15.2f %15.2f\n", "beta",
@@ -330,29 +332,28 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
   }
 #endif
-  for (int bi = 0; bi < 6; ++bi) {
+  for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
     std::vector<float> out(ds.dim);
     const double t0 = Now();
     for (size_t i = 0; i < ds.n_train; ++i) {
-      turboquant::Dequantize(R, b, all_payloads[bi].data() + i * ps,
-                             out.data());
+      turboquant::internal::DequantizeAffine(
+          R, b, all_payloads[bi].data() + i * ps, out.data());
     }
     const double dt = Now() - t0;
     std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_affine", static_cast<int>(b),
                 1000.0 * dt,
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
   }
-  for (int bi = 0; bi < 6; ++bi) {
-    if (!beta_supported[bi]) continue;
+  for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
     std::vector<float> out(ds.dim);
     const double t0 = Now();
     for (size_t i = 0; i < ds.n_train; ++i) {
-      turboquant::DequantizeBeta(R, b, all_payloads_beta[bi].data() + i * ps,
-                                 out.data());
+      turboquant::internal::DequantizeBeta(
+          R, b, all_payloads_beta[bi].data() + i * ps, out.data());
     }
     const double dt = Now() - t0;
     std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_beta", static_cast<int>(b),
@@ -562,14 +563,13 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 1000.0 * t_deq, 1000.0 * t_gemm);
   };
 
-  for (int bi = 0; bi < 6; ++bi) {
+  for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
-    run_variant("affine", &turboquant::Dequantize, all_payloads[bi], ps, b);
-    if (beta_supported[bi]) {
-      run_variant("beta", &turboquant::DequantizeBeta,
-                  all_payloads_beta[bi], ps, b);
-    }
+    run_variant("affine", &turboquant::internal::DequantizeAffine,
+                all_payloads[bi], ps, b);
+    run_variant("beta", &turboquant::internal::DequantizeBeta,
+                all_payloads_beta[bi], ps, b);
   }
 }
 

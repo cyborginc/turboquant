@@ -37,6 +37,11 @@ TEST(Packing, Roundtrip_1bit) {
     RoundtripBits(QuantBits::B1, n);
   }
 }
+TEST(Packing, Roundtrip_3bit) {
+  for (size_t n : {1ul, 7ul, 8ul, 9ul, 15ul, 16ul, 17ul, 64ul, 257ul}) {
+    RoundtripBits(QuantBits::B3, n);
+  }
+}
 TEST(Packing, Roundtrip_2bit) {
   for (size_t n : {1ul, 3ul, 4ul, 5ul, 16ul, 17ul, 31ul, 1023ul}) {
     RoundtripBits(QuantBits::B2, n);

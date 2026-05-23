@@ -140,6 +140,7 @@ if(TURBOQUANT_BUILD_DATASET_BENCH)
   if(HDF5_FOUND AND TURBOQUANT_BLAS_FOUND)
     add_executable(turboquant_dataset_bench bench/bench_dataset.cc)
     target_include_directories(turboquant_dataset_bench PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
       ${HDF5_INCLUDE_DIRS} ${TURBOQUANT_BLAS_INCLUDES})
     target_link_libraries(turboquant_dataset_bench PRIVATE
       turboquant ${HDF5_LIBRARIES} ${TURBOQUANT_BLAS_LIBS})
