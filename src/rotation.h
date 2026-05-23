@@ -22,6 +22,11 @@ void FastHadamardTransformUnscaled(float* data, size_t n);
 // data[i] = scale * data[i] * signs[i], single SIMD pass.
 void ApplySignsAndScale(float* data, const float* signs, size_t n, float scale);
 
+// Forward rotation: data := (1/sqrt(n)) * H * D * data, in place. Multiplies
+// by `signs` during the WHT's first SIMD load so the sign flip never costs a
+// standalone read+write pass. `n` must be a power of two.
+void ForwardRotate(float* data, const float* signs, size_t n);
+
 }  // namespace turboquant
 
 #endif  // TURBOQUANT_SRC_ROTATION_H_

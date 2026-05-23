@@ -8,9 +8,11 @@
 #include "turboquant/turboquant.h"
 
 using turboquant::Dequantize;
+using turboquant::DequantizeBeta;
 using turboquant::PayloadSize;
 using turboquant::QuantBits;
 using turboquant::Quantize;
+using turboquant::QuantizeBeta;
 using turboquant::Rotator;
 
 namespace {
@@ -106,6 +108,47 @@ TEST(Roundtrip, PayloadHeaderIsScale) {
   // PayloadSize is 4 (scale) + ceil(padded_dim * bits / 8).
   EXPECT_EQ(PayloadSize(dim, QuantBits::B8), 4u + 128u);
 }
+
+// Beta-codebook variant: roundtrip MSE should decrease with bit width, and at
+// each bit width Beta's SNR should be at least as good as affine on rotated
+// Gaussian inputs (where the rotated coord distribution matches the codebook).
+class BetaRoundtripTest : public ::testing::TestWithParam<QuantBits> {};
+
+TEST_P(BetaRoundtripTest, MseDecreasesWithBits) {
+  const QuantBits bits = GetParam();
+  const size_t dim = 768;
+  Rotator R(dim, 0xCAFE);
+  std::mt19937_64 rng(0xABCD0001);
+  std::normal_distribution<float> dist(0, 1);
+  std::vector<float> x(dim);
+  for (size_t i = 0; i < dim; ++i) x[i] = dist(rng);
+
+  std::vector<uint8_t> payload(PayloadSize(dim, bits));
+  QuantizeBeta(R, bits, x.data(), payload.data());
+  std::vector<float> y(dim);
+  DequantizeBeta(R, bits, payload.data(), y.data());
+
+  const double mse = Mse(x.data(), y.data(), dim);
+  const double var = Variance(x.data(), dim);
+  const double snr = var / std::max(mse, 1e-30);
+
+  // Loose lower bounds — sanity-check that quality improves with bits. We do
+  // not assert vs the affine path here since recall depends on dataset shape,
+  // not synthetic Gaussians.
+  switch (bits) {
+    case QuantBits::B1: EXPECT_GT(snr, 0.3); break;
+    case QuantBits::B2: EXPECT_GT(snr, 1.5); break;
+    case QuantBits::B4: EXPECT_GT(snr, 30.0); break;
+    case QuantBits::B6: EXPECT_GT(snr, 200.0); break;
+    case QuantBits::B8: EXPECT_GT(snr, 1000.0); break;
+    case QuantBits::B12: break;  // B12 not supported by Beta path.
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(BetaWidths, BetaRoundtripTest,
+                         ::testing::Values(QuantBits::B1, QuantBits::B2,
+                                           QuantBits::B4, QuantBits::B6,
+                                           QuantBits::B8));
 
 TEST(Roundtrip, NonPowerOf2Dim) {
   const size_t dim = 100;

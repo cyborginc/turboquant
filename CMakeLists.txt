@@ -48,6 +48,7 @@ add_library(turboquant
   src/packing.cc
   src/rotation.cc
   src/kernels.cc
+  src/codebook.cc
 )
 target_include_directories(turboquant
   PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include

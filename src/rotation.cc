@@ -140,6 +140,66 @@ void FastHadamardTransformUnscaledImpl(float* data, size_t n) {
   // No scaling here — caller pairs this with ApplySignsAndScale.
 }
 
+// Mirror of FusedInRegisterPass that additionally multiplies by `signs` during
+// the first SIMD load. Folds the diagonal D matrix into the WHT's first stage,
+// removing the standalone ApplySigns pass.
+size_t FusedInRegisterPassWithSigns(float* data, const float* signs, size_t n) {
+  const hn::ScalableTag<float> d;
+  const size_t lanes = hn::Lanes(d);
+  if (lanes < 2 || n < lanes) return 0;
+
+  if (lanes == 4) {
+    for (size_t i = 0; i + lanes <= n; i += lanes) {
+      auto v = hn::LoadU(d, data + i);
+      auto s = hn::LoadU(d, signs + i);
+      v = hn::Mul(v, s);
+      // h=1
+      auto e = hn::DupEven(v);
+      auto o = hn::DupOdd(v);
+      v = hn::OddEven(hn::Sub(e, o), hn::Add(e, o));
+      // h=2
+      auto lo = hn::ConcatLowerLower(d, v, v);
+      auto hi = hn::ConcatUpperUpper(d, v, v);
+      v = hn::ConcatLowerLower(d, hn::Sub(lo, hi), hn::Add(lo, hi));
+      hn::StoreU(v, d, data + i);
+    }
+    return 2;
+  }
+
+  for (size_t i = 0; i + lanes <= n; i += lanes) {
+    auto v = hn::LoadU(d, data + i);
+    auto s = hn::LoadU(d, signs + i);
+    v = hn::Mul(v, s);
+    auto e = hn::DupEven(v);
+    auto o = hn::DupOdd(v);
+    v = hn::OddEven(hn::Sub(e, o), hn::Add(e, o));
+    hn::StoreU(v, d, data + i);
+  }
+  return 1;
+}
+
+void ForwardRotateImpl(float* data, const float* signs, size_t n) {
+  if (n == 0) return;
+  if (n == 1) {
+    data[0] *= signs[0];
+    return;
+  }
+  const hn::ScalableTag<float> d;
+  const size_t lanes = hn::Lanes(d);
+
+  size_t h_done = 0;
+  if (n >= lanes && lanes >= 2) {
+    h_done = FusedInRegisterPassWithSigns(data, signs, n);
+  } else {
+    // n smaller than SIMD width: scalar sign pass, then standard butterflies.
+    for (size_t i = 0; i < n; ++i) data[i] *= signs[i];
+  }
+  for (size_t h = (h_done == 0 ? 1 : h_done * 2); h < n; h <<= 1) {
+    ButterflyStride(data, n, h);
+  }
+  ScaleInPlace(data, n, 1.0f / std::sqrt(static_cast<float>(n)));
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace turboquant
 HWY_AFTER_NAMESPACE();
@@ -151,6 +211,7 @@ HWY_EXPORT(HadamardTransformImpl);
 HWY_EXPORT(ApplySignsImpl);
 HWY_EXPORT(FastHadamardTransformUnscaledImpl);
 HWY_EXPORT(ApplySignsAndScaleImpl);
+HWY_EXPORT(ForwardRotateImpl);
 
 void HadamardTransform(float* data, size_t n) {
   HWY_DYNAMIC_DISPATCH(HadamardTransformImpl)(data, n);
@@ -167,6 +228,10 @@ void FastHadamardTransformUnscaled(float* data, size_t n) {
 void ApplySignsAndScale(float* data, const float* signs, size_t n,
                         float scale) {
   HWY_DYNAMIC_DISPATCH(ApplySignsAndScaleImpl)(data, signs, n, scale);
+}
+
+void ForwardRotate(float* data, const float* signs, size_t n) {
+  HWY_DYNAMIC_DISPATCH(ForwardRotateImpl)(data, signs, n);
 }
 
 }  // namespace turboquant

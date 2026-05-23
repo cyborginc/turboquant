@@ -5,6 +5,7 @@
 #include <cstring>
 #include <vector>
 
+#include "codebook.h"
 #include "kernels.h"
 #include "packing.h"
 #include "rotation.h"
@@ -56,6 +57,25 @@ Rotator::Rotator(size_t dim, uint64_t seed)
     const uint64_t r = SplitMix64(s);
     signs_[i] = (r & 1ULL) ? 1.0f : -1.0f;
   }
+  // Build Beta codebooks for all supported bit widths (B12 skipped — 4096
+  // levels makes both the Lloyd-Max construction and the per-coord encode
+  // expensive enough not to be useful at this scope).
+  beta_codebooks_.resize(13);  // indexed by Bits(QuantBits); only some slots filled.
+  for (QuantBits b : {QuantBits::B1, QuantBits::B2, QuantBits::B4,
+                      QuantBits::B6, QuantBits::B8}) {
+    const int bi = Bits(b);
+    beta_codebooks_[bi] = std::make_unique<BetaCodebook>(b, padded_dim_);
+  }
+}
+
+Rotator::~Rotator() = default;
+Rotator::Rotator(Rotator&&) noexcept = default;
+Rotator& Rotator::operator=(Rotator&&) noexcept = default;
+
+const BetaCodebook* Rotator::beta_codebook(QuantBits bits) const {
+  const int bi = Bits(bits);
+  if (bi < 0 || static_cast<size_t>(bi) >= beta_codebooks_.size()) return nullptr;
+  return beta_codebooks_[bi].get();
 }
 
 void Rotator::Apply(const float* x, float* out) const {
@@ -63,8 +83,7 @@ void Rotator::Apply(const float* x, float* out) const {
   if (padded_dim_ > dim_) {
     std::memset(out + dim_, 0, (padded_dim_ - dim_) * sizeof(float));
   }
-  ApplySigns(out, signs_.data(), padded_dim_);
-  HadamardTransform(out, padded_dim_);
+  ForwardRotate(out, signs_.data(), padded_dim_);
 }
 
 void Rotator::ApplyInverse(float* y_padded, float* out_dim) const {
@@ -108,6 +127,65 @@ void Quantize(const Rotator& rot, QuantBits bits, const float* x,
 
   // Packed codes.
   PackCodes(codes, pd, bits, payload_out + kHeaderBytes);
+}
+
+void QuantizeBeta(const Rotator& rot, QuantBits bits, const float* x,
+                  uint8_t* payload_out) {
+  const BetaCodebook* cb = rot.beta_codebook(bits);
+  if (!cb) return;  // unsupported (B12)
+  const size_t pd = rot.padded_dim();
+  if (tls_rotated.size() < pd) tls_rotated.resize(pd);
+  if (tls_codes.size() < pd) tls_codes.resize(pd);
+  float* rotated = tls_rotated.data();
+  uint16_t* codes = tls_codes.data();
+
+  // Compute ||v|| from the original (un-padded) input.
+  double sumsq = 0.0;
+  const size_t d = rot.dim();
+  for (size_t i = 0; i < d; ++i) sumsq += static_cast<double>(x[i]) * x[i];
+  const float norm = static_cast<float>(std::sqrt(sumsq));
+  const float inv_norm = norm > 1e-20f ? 1.0f / norm : 0.0f;
+
+  // Normalize into rotated[] (with zero padding), then apply forward rotation.
+  for (size_t i = 0; i < d; ++i) rotated[i] = x[i] * inv_norm;
+  if (pd > d) std::memset(rotated + d, 0, (pd - d) * sizeof(float));
+  // Apply signs + WHT + 1/sqrt(pd) — same path as Rotator::Apply, but on the
+  // already-padded buffer (skip the memcpy into rotated[] that Apply does).
+  ForwardRotate(rotated, rot.signs(), pd);
+
+  // Encode each rotated coord to its Lloyd-Max code.
+  EncodeBetaCodebook(rotated, pd, cb->boundaries(), cb->num_boundaries(), codes);
+
+  // scale = ||v|| / <u_rot, x_hat>. Falls back to ||v|| if the inner product
+  // degenerates (e.g., zero vector).
+  const float inner =
+      CentroidInnerProduct(rotated, codes, pd, cb->centroids());
+  const float scale_eff =
+      std::abs(inner) > 1e-20f ? norm / inner : norm;
+
+  std::memcpy(payload_out, &scale_eff, sizeof(float));
+  PackCodes(codes, pd, bits, payload_out + kHeaderBytes);
+}
+
+void DequantizeBeta(const Rotator& rot, QuantBits bits, const uint8_t* payload,
+                    float* x_out) {
+  const BetaCodebook* cb = rot.beta_codebook(bits);
+  if (!cb) return;
+  const size_t pd = rot.padded_dim();
+  float scale;
+  std::memcpy(&scale, payload, sizeof(float));
+
+  if (tls_codes.size() < pd) tls_codes.resize(pd);
+  if (tls_rotated.size() < pd) tls_rotated.resize(pd);
+  uint16_t* codes = tls_codes.data();
+  float* rotated = tls_rotated.data();
+  UnpackCodes(payload + kHeaderBytes, pd, bits, codes);
+
+  // rotated[i] = scale * centroid[codes[i]] — single SIMD pass with gather.
+  DecodeBetaCodebook(codes, pd, cb->centroids(), scale, rotated);
+
+  // Inverse rotation (same as the affine path).
+  rot.ApplyInverse(rotated, x_out);
 }
 
 void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,

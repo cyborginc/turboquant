@@ -95,6 +95,81 @@ void DequantizeBinaryImpl(const uint16_t* codes, size_t n, float scale,
   }
 }
 
+// Encode by counting how many boundaries each value exceeds. Outer loop over
+// boundaries keeps the per-lane code accumulator register-resident; inner loop
+// is SIMD over the n input values.
+void EncodeBetaCodebookImpl(const float* values, size_t n,
+                            const float* boundaries, size_t num_boundaries,
+                            uint16_t* codes_out) {
+  const hn::ScalableTag<float> df;
+  const hn::Rebind<int32_t, decltype(df)> di32;
+  const hn::Rebind<uint16_t, decltype(df)> du16;
+  const size_t lanes = hn::Lanes(df);
+  const auto v_one = hn::Set(di32, 1);
+  const auto v_zero_i32 = hn::Zero(di32);
+
+  size_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto v_codes = hn::Zero(di32);
+    const auto vx = hn::LoadU(df, values + i);
+    for (size_t k = 0; k < num_boundaries; ++k) {
+      const auto vb = hn::Set(df, boundaries[k]);
+      const auto m32 = hn::RebindMask(di32, hn::Gt(vx, vb));
+      v_codes = hn::Add(v_codes, hn::IfThenElse(m32, v_one, v_zero_i32));
+    }
+    hn::StoreU(hn::DemoteTo(du16, v_codes), du16, codes_out + i);
+  }
+  for (; i < n; ++i) {
+    int c = 0;
+    for (size_t k = 0; k < num_boundaries; ++k) {
+      if (values[i] > boundaries[k]) ++c;
+    }
+    codes_out[i] = static_cast<uint16_t>(c);
+  }
+}
+
+void DecodeBetaCodebookImpl(const uint16_t* codes, size_t n,
+                            const float* centroids, float scale,
+                            float* data_out) {
+  const hn::ScalableTag<float> df;
+  const hn::Rebind<int32_t, decltype(df)> di32;
+  const hn::Rebind<uint16_t, decltype(df)> du16;
+  const size_t lanes = hn::Lanes(df);
+  const auto v_scale = hn::Set(df, scale);
+  size_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    const auto vu16 = hn::LoadU(du16, codes + i);
+    const auto vi32 = hn::PromoteTo(di32, vu16);
+    const auto v = hn::GatherIndex(df, centroids, vi32);
+    hn::StoreU(hn::Mul(v, v_scale), df, data_out + i);
+  }
+  for (; i < n; ++i) {
+    data_out[i] = scale * centroids[codes[i]];
+  }
+}
+
+float CentroidInnerProductImpl(const float* values, const uint16_t* codes,
+                               size_t n, const float* centroids) {
+  const hn::ScalableTag<float> df;
+  const hn::Rebind<int32_t, decltype(df)> di32;
+  const hn::Rebind<uint16_t, decltype(df)> du16;
+  const size_t lanes = hn::Lanes(df);
+  auto vacc = hn::Zero(df);
+  size_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    const auto vu16 = hn::LoadU(du16, codes + i);
+    const auto vi32 = hn::PromoteTo(di32, vu16);
+    const auto vc = hn::GatherIndex(df, centroids, vi32);
+    const auto vv = hn::LoadU(df, values + i);
+    vacc = hn::MulAdd(vv, vc, vacc);
+  }
+  float acc = hn::ReduceSum(df, vacc);
+  for (; i < n; ++i) {
+    acc += values[i] * centroids[codes[i]];
+  }
+  return acc;
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace turboquant
 HWY_AFTER_NAMESPACE();
@@ -107,6 +182,9 @@ HWY_EXPORT(QuantizeAffineImpl);
 HWY_EXPORT(QuantizeBinaryImpl);
 HWY_EXPORT(DequantizeAffineImpl);
 HWY_EXPORT(DequantizeBinaryImpl);
+HWY_EXPORT(EncodeBetaCodebookImpl);
+HWY_EXPORT(DecodeBetaCodebookImpl);
+HWY_EXPORT(CentroidInnerProductImpl);
 
 float MaxAbs(const float* data, size_t n) {
   return HWY_DYNAMIC_DISPATCH(MaxAbsImpl)(data, n);
@@ -127,6 +205,21 @@ void DequantizeAffine(const uint16_t* codes, size_t n, float scale,
 void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
                       float* data_out) {
   HWY_DYNAMIC_DISPATCH(DequantizeBinaryImpl)(codes, n, scale, data_out);
+}
+void EncodeBetaCodebook(const float* values, size_t n, const float* boundaries,
+                        size_t num_boundaries, uint16_t* codes_out) {
+  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)(values, n, boundaries,
+                                               num_boundaries, codes_out);
+}
+void DecodeBetaCodebook(const uint16_t* codes, size_t n, const float* centroids,
+                        float scale, float* data_out) {
+  HWY_DYNAMIC_DISPATCH(DecodeBetaCodebookImpl)(codes, n, centroids, scale,
+                                               data_out);
+}
+float CentroidInnerProduct(const float* values, const uint16_t* codes, size_t n,
+                           const float* centroids) {
+  return HWY_DYNAMIC_DISPATCH(CentroidInnerProductImpl)(values, codes, n,
+                                                        centroids);
 }
 
 }  // namespace turboquant

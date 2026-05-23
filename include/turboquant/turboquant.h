@@ -3,9 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace turboquant {
+
+class BetaCodebook;  // Private; defined in src/codebook.h.
 
 enum class QuantBits : uint8_t {
   B1 = 1,
@@ -32,6 +35,11 @@ size_t PayloadSize(size_t dim, QuantBits bits);
 class Rotator {
  public:
   Rotator(size_t dim, uint64_t seed);
+  ~Rotator();  // Out-of-line: BetaCodebook is incomplete here.
+  Rotator(Rotator&&) noexcept;
+  Rotator& operator=(Rotator&&) noexcept;
+  Rotator(const Rotator&) = delete;
+  Rotator& operator=(const Rotator&) = delete;
 
   size_t dim() const { return dim_; }
   size_t padded_dim() const { return padded_dim_; }
@@ -45,10 +53,17 @@ class Rotator {
   // entries of D * H * y_padded.
   void ApplyInverse(float* y_padded, float* out_dim) const;
 
+  // Codebook used by the Beta-path quant/dequant. nullptr if the bit width
+  // isn't supported by that path (currently B12 is skipped — too many levels
+  // to be useful at this scope).
+  const BetaCodebook* beta_codebook(QuantBits bits) const;
+
  private:
   size_t dim_;
   size_t padded_dim_;
   std::vector<float> signs_;  // length padded_dim_, entries are +1 / -1
+  // One codebook per supported bit width. Indexed by Bits(QuantBits).
+  std::vector<std::unique_ptr<BetaCodebook>> beta_codebooks_;
 };
 
 // Encode `x` (length rot.dim()) into `payload_out` (PayloadSize(rot.dim(), bits) bytes).
@@ -64,6 +79,22 @@ void Quantize(const Rotator& rot, QuantBits bits, const float* x,
 //     1/sqrt(padded_dim) normalization.
 void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
                 float* x_out);
+
+// Beta-codebook variant of Quantize/Dequantize.
+//   - Unit-normalize x, then rotate.
+//   - Encode each rotated coord via the Lloyd-Max codebook for
+//     Beta((padded_dim-1)/2, (padded_dim-1)/2) — levels live where the
+//     distribution's mass actually is, instead of uniformly spaced.
+//   - Store scale = ||v|| / <u_rot, x_hat>: a length-renormalized scale
+//     that makes the inner-product estimator <q, v_hat> ≈ <q, v> unbiased.
+// Output payload uses the same header + packed-codes layout as Quantize, so
+// PayloadSize is unchanged. Currently supported for B1, B2, B4, B6, B8.
+// QuantizeBeta with B12 will return without writing (rot.beta_codebook
+// returns nullptr).
+void QuantizeBeta(const Rotator& rot, QuantBits bits, const float* x,
+                  uint8_t* payload_out);
+void DequantizeBeta(const Rotator& rot, QuantBits bits, const uint8_t* payload,
+                    float* x_out);
 
 }  // namespace turboquant
 

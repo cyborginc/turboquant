@@ -1,32 +1,12 @@
 #include "packing.h"
 
-#include <cassert>
 #include <cstring>
 
 namespace turboquant {
 namespace {
-
-void PackBitstream(const uint16_t* codes, size_t n, int bits, uint8_t* out) {
-  const size_t total_bits = n * static_cast<size_t>(bits);
-  const size_t total_bytes = (total_bits + 7) / 8;
-  std::memset(out, 0, total_bytes);
-  for (size_t i = 0; i < n; ++i) {
-    const uint32_t value = codes[i];
-    const size_t bit_off = i * static_cast<size_t>(bits);
-    const size_t byte_off = bit_off >> 3;
-    const int shift = static_cast<int>(bit_off & 7);
-    // A code spans at most 12 bits, so it touches at most 3 bytes when shifted.
-    uint32_t shifted = value << shift;
-    out[byte_off] |= static_cast<uint8_t>(shifted & 0xFFu);
-    if (shift + bits > 8) {
-      out[byte_off + 1] |= static_cast<uint8_t>((shifted >> 8) & 0xFFu);
-      if (shift + bits > 16) {
-        out[byte_off + 2] |= static_cast<uint8_t>((shifted >> 16) & 0xFFu);
-      }
-    }
-  }
-}
-
+// Forward decls so PackCodes can call them; full definitions below.
+void PackB6(const uint16_t* codes, size_t n, uint8_t* out);
+void PackB12(const uint16_t* codes, size_t n, uint8_t* out);
 }  // namespace
 
 void PackCodes(const uint16_t* codes, size_t n, QuantBits bits, uint8_t* out) {
@@ -85,13 +65,84 @@ void PackCodes(const uint16_t* codes, size_t n, QuantBits bits, uint8_t* out) {
       return;
     }
     case QuantBits::B6:
+      PackB6(codes, n, out);
+      return;
     case QuantBits::B12:
-      PackBitstream(codes, n, static_cast<int>(bits), out);
+      PackB12(codes, n, out);
       return;
   }
 }
 
 namespace {
+
+// 8 codes occupy 48 bits = 6 bytes. Pack via a u64 register and write its low
+// 6 bytes per iter (compiler lowers the 6-byte memcpy to a 32-bit + 16-bit
+// store).
+void PackB6(const uint16_t* codes, size_t n, uint8_t* out) {
+  const size_t tot_bytes = (n * 6 + 7) / 8;
+  size_t i = 0;
+  while (i + 8 <= n) {
+    const size_t byte_off = 6 * (i / 8);
+    const uint64_t v =
+        (static_cast<uint64_t>(codes[i + 0] & 0x3F) << 0) |
+        (static_cast<uint64_t>(codes[i + 1] & 0x3F) << 6) |
+        (static_cast<uint64_t>(codes[i + 2] & 0x3F) << 12) |
+        (static_cast<uint64_t>(codes[i + 3] & 0x3F) << 18) |
+        (static_cast<uint64_t>(codes[i + 4] & 0x3F) << 24) |
+        (static_cast<uint64_t>(codes[i + 5] & 0x3F) << 30) |
+        (static_cast<uint64_t>(codes[i + 6] & 0x3F) << 36) |
+        (static_cast<uint64_t>(codes[i + 7] & 0x3F) << 42);
+    std::memcpy(out + byte_off, &v, 6);  // low 48 bits
+    i += 8;
+  }
+  if (i < n) {
+    // Scalar tail. Zero the remaining output first so the OR-in below works.
+    const size_t byte_off = i * 6 / 8;
+    std::memset(out + byte_off, 0, tot_bytes - byte_off);
+    for (; i < n; ++i) {
+      const size_t bit_off = i * 6;
+      const size_t bo = bit_off >> 3;
+      const int shift = static_cast<int>(bit_off & 7);
+      const uint32_t shifted = (static_cast<uint32_t>(codes[i]) & 0x3F) << shift;
+      out[bo] |= static_cast<uint8_t>(shifted & 0xFF);
+      if (shift + 6 > 8) {
+        out[bo + 1] |= static_cast<uint8_t>((shifted >> 8) & 0xFF);
+      }
+    }
+  }
+}
+
+// 4 codes occupy 48 bits = 6 bytes. Same pattern.
+void PackB12(const uint16_t* codes, size_t n, uint8_t* out) {
+  const size_t tot_bytes = (n * 12 + 7) / 8;
+  size_t i = 0;
+  while (i + 4 <= n) {
+    const size_t byte_off = 6 * (i / 4);
+    const uint64_t v =
+        (static_cast<uint64_t>(codes[i + 0] & 0xFFF) << 0) |
+        (static_cast<uint64_t>(codes[i + 1] & 0xFFF) << 12) |
+        (static_cast<uint64_t>(codes[i + 2] & 0xFFF) << 24) |
+        (static_cast<uint64_t>(codes[i + 3] & 0xFFF) << 36);
+    std::memcpy(out + byte_off, &v, 6);
+    i += 4;
+  }
+  if (i < n) {
+    const size_t byte_off = i * 12 / 8;
+    std::memset(out + byte_off, 0, tot_bytes - byte_off);
+    for (; i < n; ++i) {
+      const size_t bit_off = i * 12;
+      const size_t bo = bit_off >> 3;
+      const int shift = static_cast<int>(bit_off & 7);
+      const uint32_t shifted =
+          (static_cast<uint32_t>(codes[i]) & 0xFFF) << shift;
+      out[bo] |= static_cast<uint8_t>(shifted & 0xFF);
+      out[bo + 1] |= static_cast<uint8_t>((shifted >> 8) & 0xFF);
+      if (shift + 12 > 16) {
+        out[bo + 2] |= static_cast<uint8_t>((shifted >> 16) & 0xFF);
+      }
+    }
+  }
+}
 
 // 8 codes occupy 48 bits = 6 bytes. The bulk loop loads 8 bytes per iter
 // (reading 2 bytes more than needed); the scalar tail handles the last group

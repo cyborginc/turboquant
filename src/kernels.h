@@ -27,6 +27,21 @@ void DequantizeAffine(const uint16_t* codes, size_t n, float scale,
 void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
                       float* data_out);
 
+// Beta-codebook encode. For each input value, code = |{k : value > boundaries[k]}|.
+// SIMD over the input dimension; outer loop over boundaries keeps the per-
+// lane accumulator register-resident.
+void EncodeBetaCodebook(const float* values, size_t n, const float* boundaries,
+                        size_t num_boundaries, uint16_t* codes_out);
+
+// data_out[i] = scale * centroids[codes[i]], single SIMD pass with table
+// gather.
+void DecodeBetaCodebook(const uint16_t* codes, size_t n, const float* centroids,
+                        float scale, float* data_out);
+
+// inner_product(values, centroids[codes[*]]) — single pass over n.
+float CentroidInnerProduct(const float* values, const uint16_t* codes, size_t n,
+                           const float* centroids);
+
 }  // namespace turboquant
 
 #endif  // TURBOQUANT_SRC_KERNELS_H_
