@@ -32,4 +32,6 @@ void DequantizeBeta(const Rotator& rot, QuantBits bits, const uint8_t* payload,
 }  // namespace internal
 }  // namespace turboquant
 
+#include "rotator_mixed.h"  // RotatorMixed3 + QuantizeMixed3 / DequantizeMixed3.
+
 #endif  // TURBOQUANT_SRC_INTERNAL_H_

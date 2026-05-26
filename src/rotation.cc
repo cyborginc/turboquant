@@ -178,6 +178,35 @@ size_t FusedInRegisterPassWithSigns(float* data, const float* signs, size_t n) {
   return 1;
 }
 
+// Householder reflection H_3 over the three rows of a 3 × N matrix, SIMD over
+// the column dimension. H_3 = I - (2/3) * ones * ones^T; per column the
+// formula is `entry -= (2/3) * (a + b + c)`, applied to all three rows.
+void Householder3InPlaceImpl(float* data, size_t n_block) {
+  const hn::ScalableTag<float> d;
+  const size_t lanes = hn::Lanes(d);
+  const auto two_thirds = hn::Set(d, 2.0f / 3.0f);
+  float* row0 = data;
+  float* row1 = data + n_block;
+  float* row2 = data + 2 * n_block;
+  size_t j = 0;
+  for (; j + lanes <= n_block; j += lanes) {
+    const auto va = hn::LoadU(d, row0 + j);
+    const auto vb = hn::LoadU(d, row1 + j);
+    const auto vc = hn::LoadU(d, row2 + j);
+    const auto vs = hn::Mul(two_thirds, hn::Add(hn::Add(va, vb), vc));
+    hn::StoreU(hn::Sub(va, vs), d, row0 + j);
+    hn::StoreU(hn::Sub(vb, vs), d, row1 + j);
+    hn::StoreU(hn::Sub(vc, vs), d, row2 + j);
+  }
+  for (; j < n_block; ++j) {
+    const float a = row0[j], b = row1[j], c = row2[j];
+    const float s = (2.0f / 3.0f) * (a + b + c);
+    row0[j] = a - s;
+    row1[j] = b - s;
+    row2[j] = c - s;
+  }
+}
+
 void ForwardRotateImpl(float* data, const float* signs, size_t n) {
   if (n == 0) return;
   if (n == 1) {
@@ -212,6 +241,7 @@ HWY_EXPORT(ApplySignsImpl);
 HWY_EXPORT(FastHadamardTransformUnscaledImpl);
 HWY_EXPORT(ApplySignsAndScaleImpl);
 HWY_EXPORT(ForwardRotateImpl);
+HWY_EXPORT(Householder3InPlaceImpl);
 
 void HadamardTransform(float* data, size_t n) {
   HWY_DYNAMIC_DISPATCH(HadamardTransformImpl)(data, n);
@@ -232,6 +262,10 @@ void ApplySignsAndScale(float* data, const float* signs, size_t n,
 
 void ForwardRotate(float* data, const float* signs, size_t n) {
   HWY_DYNAMIC_DISPATCH(ForwardRotateImpl)(data, signs, n);
+}
+
+void Householder3InPlace(float* data, size_t n_block) {
+  HWY_DYNAMIC_DISPATCH(Householder3InPlaceImpl)(data, n_block);
 }
 
 }  // namespace turboquant

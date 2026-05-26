@@ -27,6 +27,12 @@ void ApplySignsAndScale(float* data, const float* signs, size_t n, float scale);
 // standalone read+write pass. `n` must be a power of two.
 void ForwardRotate(float* data, const float* signs, size_t n);
 
+// Apply the Householder reflection H_3 = I - (2/3) * 1 * 1^T over the three
+// "rows" of a 3 × N matrix laid out as data[0..N], data[N..2N], data[2N..3N].
+// Per column: each entry becomes `entry - (2/3) * (sum of column)`.
+// H_3 is its own inverse, so the same function applies both directions.
+void Householder3InPlace(float* data, size_t n_block);
+
 }  // namespace turboquant
 
 #endif  // TURBOQUANT_SRC_ROTATION_H_

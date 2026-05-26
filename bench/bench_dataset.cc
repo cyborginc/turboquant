@@ -43,6 +43,7 @@ inline void Fp16ToFp32(const uint16_t* src, size_t n, float* dst) {
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <queue>
 #include <string>
 #include <unordered_set>
@@ -253,6 +254,20 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
   constexpr int kNumBits = sizeof(bits_list) / sizeof(bits_list[0]);
   std::vector<std::vector<uint8_t>> all_payloads(kNumBits);
   std::vector<size_t> payload_sizes(kNumBits);
+
+  // Mixed-radix rotation (no padding) — only constructible when dim = 3 * 2^k.
+  const bool mixed3_supported =
+      turboquant::internal::RotatorMixed3::DimSupported(ds.dim);
+  std::unique_ptr<turboquant::internal::RotatorMixed3> R_mixed;
+  if (mixed3_supported) {
+    R_mixed = std::make_unique<turboquant::internal::RotatorMixed3>(ds.dim,
+                                                                    0x12345);
+  } else {
+    std::printf("(mixed-radix rotation: skipped — dim=%zu is not 3*2^k)\n",
+                ds.dim);
+  }
+  std::vector<std::vector<uint8_t>> all_payloads_mixed(kNumBits);
+  std::vector<size_t> payload_sizes_mixed(kNumBits);
   double t_baseline_copy = 0;
   {
     const double t0 = Now();
@@ -312,6 +327,46 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 (ds.n_train * ps) / 1e6 / dt);
   }
 
+  // Mixed-radix ingest (no padding — payload is strictly smaller for
+  // non-power-of-two dims). Two variants: beta codebook and affine min/max.
+  std::vector<std::vector<uint8_t>> all_payloads_mixed_aff(kNumBits);
+  std::vector<size_t> payload_sizes_mixed_aff(kNumBits);
+  if (mixed3_supported) {
+    for (int bi = 0; bi < kNumBits; ++bi) {
+      const QuantBits b = bits_list[bi];
+      const size_t ps = turboquant::internal::PayloadSizeMixed3(ds.dim, b);
+      payload_sizes_mixed[bi] = ps;
+      all_payloads_mixed[bi].assign(ps * ds.n_train, 0);
+      const double t0 = Now();
+      for (size_t i = 0; i < ds.n_train; ++i) {
+        turboquant::internal::QuantizeMixed3(
+            *R_mixed, b, ds.train.data() + i * ds.dim,
+            all_payloads_mixed[bi].data() + i * ps);
+      }
+      const double dt = Now() - t0;
+      std::printf("%-8s b%-7d %15.2f %15.2f  (payload %zu B, %.0f%% of padded)\n",
+                  "mix3 bet", static_cast<int>(b), 1000.0 * dt,
+                  (ds.n_train * ps) / 1e6 / dt, ps,
+                  100.0 * static_cast<double>(ps) / payload_sizes[bi]);
+    }
+    for (int bi = 0; bi < kNumBits; ++bi) {
+      const QuantBits b = bits_list[bi];
+      const size_t ps = turboquant::internal::PayloadSizeMixed3(ds.dim, b);
+      payload_sizes_mixed_aff[bi] = ps;
+      all_payloads_mixed_aff[bi].assign(ps * ds.n_train, 0);
+      const double t0 = Now();
+      for (size_t i = 0; i < ds.n_train; ++i) {
+        turboquant::internal::QuantizeMixed3Affine(
+            *R_mixed, b, ds.train.data() + i * ds.dim,
+            all_payloads_mixed_aff[bi].data() + i * ps);
+      }
+      const double dt = Now() - t0;
+      std::printf("%-8s b%-7d %15.2f %15.2f\n",
+                  "mix3 aff", static_cast<int>(b), 1000.0 * dt,
+                  (ds.n_train * ps) / 1e6 / dt);
+    }
+  }
+
   // -------------------- Read speed (dequantize) --------------------
   std::printf("\n[Read: dequantize one full pass of train set]\n");
   std::printf("%-10s %-8s %15s %15s\n", "variant", "bits", "ms_total",
@@ -359,6 +414,37 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_beta", static_cast<int>(b),
                 1000.0 * dt,
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
+  }
+  if (mixed3_supported) {
+    for (int bi = 0; bi < kNumBits; ++bi) {
+      const QuantBits b = bits_list[bi];
+      const size_t ps = payload_sizes_mixed[bi];
+      std::vector<float> out(ds.dim);
+      const double t0 = Now();
+      for (size_t i = 0; i < ds.n_train; ++i) {
+        turboquant::internal::DequantizeMixed3(
+            *R_mixed, b, all_payloads_mixed[bi].data() + i * ps, out.data());
+      }
+      const double dt = Now() - t0;
+      std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_m3_bet",
+                  static_cast<int>(b), 1000.0 * dt,
+                  (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
+    }
+    for (int bi = 0; bi < kNumBits; ++bi) {
+      const QuantBits b = bits_list[bi];
+      const size_t ps = payload_sizes_mixed_aff[bi];
+      std::vector<float> out(ds.dim);
+      const double t0 = Now();
+      for (size_t i = 0; i < ds.n_train; ++i) {
+        turboquant::internal::DequantizeMixed3Affine(
+            *R_mixed, b, all_payloads_mixed_aff[bi].data() + i * ps,
+            out.data());
+      }
+      const double dt = Now() - t0;
+      std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_m3_aff",
+                  static_cast<int>(b), 1000.0 * dt,
+                  (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
+    }
   }
 
   // -------------------- Distance speed --------------------
@@ -563,6 +649,67 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 1000.0 * t_deq, 1000.0 * t_gemm);
   };
 
+  using DeqMixedFn = void (*)(const turboquant::internal::RotatorMixed3&,
+                              QuantBits, const uint8_t*, float*);
+  auto run_mixed3 = [&](const char* label_kind, DeqMixedFn fn,
+                        const std::vector<uint8_t>& payloads, size_t ps,
+                        QuantBits b) {
+    dequant_buf.assign(ds.n_train * ds.dim, 0.0f);
+    const double t_deq0 = Now();
+    for (size_t j = 0; j < ds.n_train; ++j) {
+      fn(*R_mixed, b, payloads.data() + j * ps,
+         dequant_buf.data() + j * ds.dim);
+    }
+    const double t_deq = Now() - t_deq0;
+
+    std::vector<float> deq_dots(Nq * ds.n_train);
+    const double t_gemm0 = Now();
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                static_cast<int>(Nq), static_cast<int>(ds.n_train),
+                static_cast<int>(ds.dim), 1.0f, ds.test.data(),
+                static_cast<int>(ds.dim), dequant_buf.data(),
+                static_cast<int>(ds.dim), 0.0f, deq_dots.data(),
+                static_cast<int>(ds.n_train));
+    const double t_gemm = Now() - t_gemm0;
+
+    std::vector<float> deq_norms2;
+    if (!angular) {
+      deq_norms2.resize(ds.n_train);
+      for (size_t j = 0; j < ds.n_train; ++j) {
+        double s = 0;
+        for (size_t d = 0; d < ds.dim; ++d) {
+          const float vv = dequant_buf[j * ds.dim + d];
+          s += vv * vv;
+        }
+        deq_norms2[j] = static_cast<float>(s);
+      }
+    }
+    double deq_recall_sum = 0;
+    {
+      std::vector<float> ranked;
+      for (size_t i = 0; i < Nq; ++i) {
+        ScoresToRanking(deq_dots.data() + i * ds.n_train, &ranked,
+                        angular ? nullptr : deq_norms2.data());
+        std::vector<int32_t> top;
+        TopKByScore(ranked.data(), ds.n_train, k_eval, &top,
+                    /*larger_is_better=*/angular ? true : false);
+        deq_recall_sum += Recall(top, gt_topk[i].data(), k_eval);
+      }
+    }
+    const double t_deqblas = t_deq + t_gemm;
+    const double ops = static_cast<double>(Nq) * ds.n_train;
+    char label[48];
+    std::snprintf(label, sizeof(label), "b%-2d %s+BLAS",
+                  static_cast<int>(b), label_kind);
+    char rel[16];
+    std::snprintf(rel, sizeof(rel), "%.2fx", t_deqblas / t_blas);
+    std::printf("%-18s %12.2f %12.2f %10.4f %12s"
+                "  (%.0fms deq + %.0fms gemm)\n",
+                label, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas,
+                deq_recall_sum / Nq, rel,
+                1000.0 * t_deq, 1000.0 * t_gemm);
+  };
+
   for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
     const size_t ps = payload_sizes[bi];
@@ -570,6 +717,12 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                 all_payloads[bi], ps, b);
     run_variant("beta", &turboquant::internal::DequantizeBeta,
                 all_payloads_beta[bi], ps, b);
+    if (mixed3_supported) {
+      run_mixed3("m3_beta", &turboquant::internal::DequantizeMixed3,
+                 all_payloads_mixed[bi], payload_sizes_mixed[bi], b);
+      run_mixed3("m3_aff", &turboquant::internal::DequantizeMixed3Affine,
+                 all_payloads_mixed_aff[bi], payload_sizes_mixed_aff[bi], b);
+    }
   }
 }
 
