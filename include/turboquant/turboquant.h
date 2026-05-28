@@ -4,11 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <vector>
 
 namespace turboquant {
-
-class BetaCodebook;  // Private; defined in src/codebook.h.
 
 enum class QuantBits : uint8_t {
   B1 = 1,
@@ -20,66 +17,54 @@ enum class QuantBits : uint8_t {
   B12 = 12,
 };
 
-// Smallest power-of-two >= dim (and >= 1).
-size_t PaddedDim(size_t dim);
-
-// Bytes of packed codes for `padded_dim` codes at the given bit width.
-size_t PackedBytes(size_t padded_dim, QuantBits bits);
-
-// Total per-vector payload size: 4-byte scale (LE float32) + N packed-code bytes.
-size_t PayloadSize(size_t dim, QuantBits bits);
-
-// TurboQuant rotation: x -> H * D * pad(x), where:
-//   - pad zero-extends to next_pow2(dim);
-//   - D is a deterministic diagonal of random {-1,+1} entries seeded by `seed`;
-//   - H is the normalized Walsh-Hadamard transform (orthogonal, ||Hv|| = ||v||).
-class Rotator {
+// Single quantizer instance, bound to a specific (dim, bits, seed) at
+// construction. Picks both the rotation scheme (mixed-radix for dim = 3*2^k,
+// padded Walsh-Hadamard otherwise) and the quantization scheme (Lloyd-Max
+// Beta codebook at b1/b2/b3/b4/b6, affine min/max at b8/b12) automatically.
+// The user never has to know which path was picked.
+//
+// Construction builds the Lloyd-Max codebook for the chosen bit width
+// (~10-200 ms at d=768 depending on configuration). After construction the
+// encode/decode paths are zero-allocation per call.
+//
+// Thread-safety: Quantize/Dequantize are safe to call concurrently from
+// multiple threads against the same Quantizer instance (per-thread scratch
+// buffers are used internally).
+class Quantizer {
  public:
-  Rotator(size_t dim, uint64_t seed);
-  ~Rotator();  // Out-of-line: BetaCodebook is incomplete here.
-  Rotator(Rotator&&) noexcept;
-  Rotator& operator=(Rotator&&) noexcept;
-  Rotator(const Rotator&) = delete;
-  Rotator& operator=(const Rotator&) = delete;
+  // Number of bytes one encoded payload occupies for the given (dim, bits).
+  // Computable without constructing.
+  static size_t PayloadBytes(size_t dim, QuantBits bits);
 
-  size_t dim() const { return dim_; }
-  size_t padded_dim() const { return padded_dim_; }
-  const float* signs() const { return signs_.data(); }
+  // `seed = 0` selects the built-in canonical seed, which is what encoders
+  // and decoders that use the default agree on. Pass a non-zero value only
+  // if you need a custom rotation (e.g., to encode the same data under
+  // multiple independent rotations).
+  Quantizer(size_t dim, QuantBits bits, uint64_t seed = 0);
+  ~Quantizer();
+  Quantizer(Quantizer&&) noexcept;
+  Quantizer& operator=(Quantizer&&) noexcept;
+  Quantizer(const Quantizer&) = delete;
+  Quantizer& operator=(const Quantizer&) = delete;
 
-  // Apply H * D * pad(x). `x` has length dim(); `out` has length padded_dim().
-  void Apply(const float* x, float* out) const;
+  size_t dim() const;
+  QuantBits bits() const;
+  size_t payload_bytes() const;  // == PayloadBytes(dim(), bits())
 
-  // Apply the inverse rotation D * H * y_padded. `y_padded` has length padded_dim()
-  // and is overwritten (acts as scratch). `out_dim` receives the leading dim()
-  // entries of D * H * y_padded.
-  void ApplyInverse(float* y_padded, float* out_dim) const;
+  // Encode `n` contiguous row-major vectors of dim floats into `n` contiguous
+  // payloads. n = 1 is the single-vector case. Zero allocation; caller owns
+  // both buffers.
+  //   x          : n * dim() floats
+  //   payloads   : n * payload_bytes() uint8s
+  void Quantize(const float* x, size_t n, uint8_t* payloads_out) const;
 
-  // Codebook used by the Beta-path quant/dequant. nullptr if the bit width
-  // isn't supported by that path (currently B12 is skipped — too many levels
-  // to be useful at this scope).
-  const BetaCodebook* beta_codebook(QuantBits bits) const;
+  // Decode `n` payloads into `n` contiguous row-major vectors.
+  void Dequantize(const uint8_t* payloads, size_t n, float* x_out) const;
 
  private:
-  size_t dim_;
-  size_t padded_dim_;
-  std::vector<float> signs_;  // length padded_dim_, entries are +1 / -1
-  // One codebook per supported bit width. Indexed by Bits(QuantBits).
-  std::vector<std::unique_ptr<BetaCodebook>> beta_codebooks_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
-
-// Encode `x` (length rot.dim()) into `payload_out` (PayloadSize(rot.dim(), bits)
-// bytes). Internally picks the best-known quantization scheme for the chosen
-// bit width: a Lloyd-Max codebook over the Beta distribution induced by the
-// rotation for low bits (B1/B2/B3/B4/B6, where it dramatically improves recall),
-// or affine min/max quantization for high bits (B8/B12, where the two schemes
-// are equivalent and affine is cheaper to encode).
-void Quantize(const Rotator& rot, QuantBits bits, const float* x,
-              uint8_t* payload_out);
-
-// Decode `payload` back to the original-dimension vector `x_out` (length
-// rot.dim()). Routing matches Quantize.
-void Dequantize(const Rotator& rot, QuantBits bits, const uint8_t* payload,
-                float* x_out);
 
 }  // namespace turboquant
 
