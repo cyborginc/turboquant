@@ -1,27 +1,38 @@
 # turboquant
 
 A C++17 library implementing the TurboQuant raw-vector quantization scheme.
-The public surface is:
+The public surface is a single class — `turboquant::Quantizer` — which picks
+both the rotation scheme and the quantization scheme appropriate for the
+requested `(dim, bits)` at construction time:
 
-- `Quantize(rot, bits, x, payload)` — rotate + quantize a float vector to a
-  packed per-vector payload.
-- `Dequantize(rot, bits, payload, x)` — recover an approximation of the
-  original float vector.
-- `DequantizeFast(rot, bits, payload, x)` — same contract, but fuses the
-  small-stride WHT stages in-register and combines the inverse sign-flip with
-  the normalization into a single SIMD pass.
+- `Quantizer(dim, bits, seed=0)` — builds the rotation and (for low bit
+  widths) a Lloyd-Max codebook tuned to the rotated coordinate distribution.
+- `q.Quantize(x, n, payloads)` — rotate + quantize `n` contiguous row-major
+  vectors into `n` contiguous packed payloads. `n = 1` is the single-vector
+  case. Zero allocation on the hot path.
+- `q.Dequantize(payloads, n, x_out)` — recover float approximations of the
+  original vectors.
+- `Quantizer::PayloadBytes(dim, bits)` — the size of one payload; computable
+  without constructing.
 
-`turboquant.h` is the only public header. Internally the hot paths use
-[Google Highway](https://github.com/google/highway) with dynamic dispatch, so a
-single binary picks the best SIMD target at runtime (SSE4 / AVX2 / AVX-512 /
-NEON / SVE / ...).
+`turboquant.h` is the only public header. The hot paths use
+[Google Highway](https://github.com/google/highway) with dynamic dispatch, so
+a single binary picks the best SIMD target at runtime (SSE4 / AVX2 /
+AVX-512 / NEON / SVE / ...).
+
+`Quantize`/`Dequantize` are safe to call concurrently from multiple threads
+against the same `Quantizer` (per-thread scratch buffers are used
+internally).
 
 ## Layout
 
 ```
-include/turboquant/turboquant.h   Public API
-src/turboquant.cc                 API glue, payload write
-src/rotation.{h,cc}               Walsh-Hadamard + sign-flip rotation (SIMD)
+include/turboquant/turboquant.h   Public API (Quantizer)
+src/turboquant.cc                 API glue + routing
+src/rotator_padded.h              Padded WHT rotation (general dim)
+src/rotator_mixed.{h,cc}          Mixed-radix rotation for dim = 3 * 2^k
+src/rotation.{h,cc}               WHT + sign-flip kernels (SIMD)
+src/codebook.{h,cc}               Lloyd-Max Beta codebook
 src/kernels.{h,cc}                Quant/dequant inner loops (SIMD)
 src/packing.{h,cc}                Bit packing per the spec
 tests/                            GoogleTest unit tests
@@ -30,49 +41,62 @@ bench/bench_dataset.cc            HDF5 dataset recall + speed bench
 CMakeLists.txt
 ```
 
-## TurboQuant rotation
+## Routing
 
-Each `Rotator(dim, seed)` defines an orthogonal transform
+`Quantizer` picks two things automatically; the caller never has to know
+which path was taken.
+
+**Rotation.** For `dim = 3 * 2^k` (covers common embedding sizes 768, 1536,
+3072), it uses a *mixed-radix* orthogonal rotation that operates on the
+unpadded vector — the payload is ~25% smaller than the padded path. For all
+other `dim`, it zero-pads to the next power of two and applies a
+sign-flip + Walsh-Hadamard rotation:
 
 ```
 y = H * D * pad(x)
 ```
 
-where `pad` zero-extends `x` to the next power-of-two `padded_dim`, `D` is a
-deterministic diagonal of `{-1, +1}` values seeded from `seed`, and `H` is the
-normalized Walsh-Hadamard transform. The transform preserves L2 norm and inner
-products (`<x, y> = <H D pad(x), H D pad(y)>`), so the rotated coordinates can
-be quantized independently with much better behavior than the raw axes.
+`D` is a deterministic ±1 diagonal seeded from `seed`, and `H` is the
+normalized Walsh-Hadamard transform. The transform preserves L2 norm and
+inner products, so the rotated coordinates can be quantized independently
+with much better behavior than the raw axes.
 
-`Quantize` applies the forward rotation. `Dequantize` and `DequantizeFast`
-apply the inverse (`D * H * y`) and crop to the original `dim`.
+**Quantization.** For `bits ∈ {1, 2, 3, 4, 6}` it uses a *Beta* codebook:
+the rotated unit vector follows `Beta((d-1)/2, (d-1)/2)` on `[-1, 1]`, so a
+Lloyd-Max codebook computed against that distribution is near-optimal. For
+`bits ∈ {8, 12}` the codebook advantage vanishes and it falls back to
+uniform-step affine quantization (`code = round(x/scale) + 2^(b-1)`,
+`scale = max_abs / (2^(b-1) - 1)`). The 1-bit affine path is the symmetric
+`code = (x >= 0)` case with `scale = max_abs`.
+
+Codebook construction takes ~10-200 ms at d=768 depending on bit width.
+After construction the encode/decode paths are zero-allocation per call.
 
 ## Payload format
 
 ```
 offset  size    field
 0       4       scale (IEEE-754 float32, little-endian)
-4       N       packed codes, N = ceil(padded_dim * bits / 8)
+4       N       packed codes, N = ceil(code_dim * bits / 8)
 ```
 
-Codes are a little-endian bitstream: code `i` occupies bits `[i*bits, (i+1)*bits)`
-with bit 0 of byte 0 being the lowest-order bit. `PayloadSize(dim, bits)`
-returns the total byte count.
+`code_dim` is `dim` on the mixed-radix path and `next_pow2(dim)` on the
+padded path. Codes are a little-endian bitstream: code `i` occupies bits
+`[i*bits, (i+1)*bits)`, with bit 0 of byte 0 the lowest-order bit.
+`Quantizer::PayloadBytes(dim, bits)` returns the total byte count.
 
-Supported bit widths: 1, 2, 4, 6, 8, 12. All non-1-bit modes use the affine
-scheme `code = round(rotated_x / scale) + (1 << (bits-1))`, with `scale =
-max_abs(rotated_x) / ((1 << (bits-1)) - 1)`. The 1-bit mode uses the symmetric
-`code = (rotated_x >= 0) ? 1 : 0`, with `scale = max_abs(rotated_x)`.
+Supported bit widths: `B1, B2, B3, B4, B6, B8, B12`.
 
 ## Build
 
 Requires CMake >= 3.16 and a C++17 compiler. Dependencies:
 
-- Google Highway (required). Linked from the system if found; otherwise fetched
-  via `FetchContent` at configure time.
+- Google Highway (required). Linked from the system if found; otherwise
+  fetched via `FetchContent` at configure time.
 - GoogleTest (optional, for unit tests).
 - google-benchmark (optional, for microbenchmarks).
-- HDF5 + BLAS (optional, for the dataset bench).
+- HDF5 + BLAS (optional, for the dataset bench; on macOS BLAS is provided
+  by the system Accelerate framework).
 
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -98,114 +122,83 @@ CMake options:
 ```cpp
 #include "turboquant/turboquant.h"
 
-constexpr size_t kDim = 128;
-turboquant::Rotator rot(kDim, /*seed=*/0xCAFE);
+constexpr size_t kDim = 768;
+turboquant::Quantizer q(kDim, turboquant::QuantBits::B4);
 
-// One-time per vector: pack into a contiguous payload.
-std::vector<uint8_t> payload(turboquant::PayloadSize(kDim, turboquant::QuantBits::B8));
-turboquant::Quantize(rot, turboquant::QuantBits::B8, x.data(), payload.data());
+// Encode a batch of n vectors into a contiguous payload buffer.
+std::vector<uint8_t> payloads(q.payload_bytes() * n);
+q.Quantize(x.data(), n, payloads.data());
 
-// One-time per query: rotate into the same space the codes live in.
-std::vector<float> q_rot(rot.padded_dim());
-turboquant::RotateQuery(rot, q.data(), q_rot.data());
-
-// Hot path: score the query against a batch of payloads in a single call.
-// (Pass n=1 for a single payload.) `payloads` is a contiguous array of
-// `n_base` payloads each PayloadSize bytes long.
-const size_t ps = turboquant::PayloadSize(kDim, turboquant::QuantBits::B8);
-std::vector<turboquant::AdcStats> stats(n_base);
-turboquant::AdcScore(rot, turboquant::QuantBits::B8, q_rot.data(),
-                     payloads.data(), ps, n_base, stats.data());
-// stats[i].dot           ~= <q, x_i>
-// stats[i].decoded_norm2 ~= <x_hat_i, x_hat_i>
-// l2_squared             = ||q||^2 + stats[i].decoded_norm2 - 2 * stats[i].dot
-// cosine                 = stats[i].dot * (1 / ||q||) * rsqrt(stats[i].decoded_norm2)
+// Decode them back to float.
+std::vector<float> recon(kDim * n);
+q.Dequantize(payloads.data(), n, recon.data());
 ```
 
 ## Dataset benchmark
 
 `turboquant_dataset_bench <file.hdf5> [k=10] [max_test=1000]` loads an
 [ann-benchmarks](https://ann-benchmarks.com/)-style file (datasets `/train`,
-`/test`, `/neighbors`) and reports:
+`/test`, `/neighbors`) and reports, per bit width and per encode variant:
 
-- Ingest throughput (Quantize vs. float32 memcpy baseline).
-- Read throughput (Dequantize vs. float32 memcpy baseline).
-- Distance throughput for three paths, per bit width:
-  - **f32 (BLAS)**: one big `sgemm(test, train^T)` on the original floats.
-  - **ADC**: per-pair `AdcScore` against the packed codes.
-  - **deq+BLAS**: dequantize the whole base to float32 once, then `sgemm`.
-- Recall@K vs. the float32 brute-force ground truth, per bit width.
+- **Ingest throughput** vs. an `fp32` memcpy and an `fp16` cast baseline.
+- **Read throughput** (full-pass dequantize) vs. the same baselines.
+- **Distance throughput** for the *dequantize + sgemm* path vs. a direct
+  `sgemm` on the original floats — and `recall@K` of the resulting top-K
+  against the float32 brute-force ground truth.
 
-The bench infers the metric from a `distance` HDF5 attribute or, failing that,
+The bench exposes each rotation/codebook variant separately
+(`affine`, `beta`, `mix3 bet`, `mix3 aff`) so the head-to-head between them
+is visible. The public `Quantizer` always selects one of these
+automatically.
+
+The metric is inferred from a `distance` HDF5 attribute or, failing that,
 from the filename (`*-angular.hdf5` → cosine, anything else → L2).
 
-Note: OpenBLAS sgemm is multi-threaded; the ADC path is single-threaded. Cap
-BLAS to one thread with `OPENBLAS_NUM_THREADS=1` for an apples-to-apples
-single-core comparison.
+Note: when linked against OpenBLAS, `sgemm` is multi-threaded; the
+dequantize step is single-threaded. Cap BLAS to one thread with
+`OPENBLAS_NUM_THREADS=1` for an apples-to-apples single-core comparison.
 
-## Sample runs
+## Sample run
 
-Hardware: 4-core x86-64 with AVX2 (Ubuntu 24.04, gcc 13). OpenBLAS uses all
-cores; the ADC path is single-threaded.
-
-### glove-25-angular — 200 queries × 1.18M base vectors, recall@10
-
-```
-path               ms_total       Mops/s   recall@10  rel_vs_f32
-f32 (BLAS)           134.76      1756.43     1.0000        1.00x
-b1  (ADC)          39127.20         6.05     0.0120      290.34x
-b1  (deq+BLAS)       427.33       553.91     0.0120        3.17x  (257ms deq + 171ms gemm)
-b2  (ADC)          15801.47        14.98     0.0675      117.25x
-b2  (deq+BLAS)       373.97       632.94     0.0675        2.78x  (251ms deq + 123ms gemm)
-b4  (ADC)          11558.38        20.48     0.6305       85.77x
-b4  (deq+BLAS)       365.46       647.68     0.6305        2.71x  (243ms deq + 122ms gemm)
-b6  (ADC)          26613.67         8.89     0.8955      197.48x
-b6  (deq+BLAS)       452.84       522.71     0.8955        3.36x  (301ms deq + 152ms gemm)
-b8  (ADC)           9229.37        25.65     0.9705       68.49x
-b8  (deq+BLAS)       357.58       661.96     0.9705        2.65x  (242ms deq + 116ms gemm)
-b12 (ADC)          29622.42         7.99     0.9975      219.81x
-b12 (deq+BLAS)       446.24       530.43     0.9975        3.31x  (324ms deq + 122ms gemm)
-```
-
-### sift-128-euclidean — 100 queries × 1.00M base vectors, recall@10
+`wiki_all_1M_cosine.hdf5` — d=768, 1M base × 1k queries, recall@100, on an
+Apple-silicon laptop (Accelerate BLAS, multi-threaded; quant/dequant
+single-threaded). Bit widths abridged to `b2 / b4 / b8`; full sweep in
+`docs/bench_mixed_radix.txt`.
 
 ```
-path               ms_total       Mops/s   recall@10  rel_vs_f32
-f32 (BLAS)           139.66       716.00     1.0000        1.00x
-b1  (ADC)          61980.22         1.61     0.0030      443.78x
-b1  (deq+BLAS)       820.27       121.91     0.0030        5.87x  (693ms deq + 127ms gemm)
-b2  (ADC)          17174.55         5.82     0.0830      122.97x
-b2  (deq+BLAS)       875.29       114.25     0.0830        6.27x  (747ms deq + 128ms gemm)
-b4  (ADC)          12702.95         7.87     0.7960       90.95x
-b4  (deq+BLAS)       853.11       117.22     0.7960        6.11x  (692ms deq + 161ms gemm)
-b6  (ADC)          38728.50         2.58     0.9420      277.30x
-b6  (deq+BLAS)      1111.15        90.00     0.9420        7.96x  (970ms deq + 141ms gemm)
-b8  (ADC)          11067.09         9.04     0.9840       79.24x
-b8  (deq+BLAS)       843.69       118.53     0.9840        6.04x  (708ms deq + 136ms gemm)
-b12 (ADC)          46565.39         2.15     0.9990      333.41x
-b12 (deq+BLAS)      1173.32        85.23     0.9990        8.40x  (1045ms deq + 129ms gemm)
+[Ingest: quantize train set]               MB/s_quantized
+fp32 memcpy                                       74790
+fp16 cast                                         36262
+b4  affine                                          439
+b4  beta                                            223
+b4  mix3 (beta, unpadded)                           226   (payload 75% of padded)
+
+[Distance: 1000 q x 1M base, recall@100]   ms_total   recall@K   rel_vs_f32
+f32 (BLAS)                                  515         1.0000      1.00x
+fp16+BLAS                                   859         0.9996      1.67x
+b2  beta+BLAS                              1630         0.8292      3.17x
+b2  mix3 beta+BLAS                         1256         0.8102      2.44x
+b4  beta+BLAS                              1612         0.9500      3.13x
+b4  mix3 beta+BLAS                         1254         0.9415      2.44x
+b8  affine+BLAS                            1495         0.9942      2.91x
+b8  mix3 aff+BLAS                          1283         0.9952      2.49x
 ```
 
 ### What to read into these numbers
 
-- **Recall is identical between ADC and deq+BLAS at every bit width**, which
-  is the correctness signal: both paths compute the same dot product (one in
-  the rotated space, one after materializing floats) so the quantization
-  error — not the kernel — is what loses recall.
-- **Quality vs. size tradeoff** is the headline: 4-bit retains 63% (glove-25)
-  / 80% (sift-128) of recall@10 at 8× compression, 6-bit ≥ 89/94%, 8-bit
-  ≥ 97/98% at 4× compression, 12-bit ≥ 99.7% at ~2.7× compression.
-- **`deq+BLAS` is several times slower than `f32 (BLAS)`** because the
-  per-batch dequant step adds ~0.7s on SIFT-1M before the matmul even
+- **The Beta codebook dominates at low bit widths.** At b2 on a cosine
+  dataset, affine quantization keeps only ~21% recall@100; the Beta
+  codebook keeps ~83% at the same 2 bits/dim. By b8 the two paths converge
+  (both ≥ 99%), which is why `Quantizer` switches to plain affine there —
+  no point paying for a codebook that doesn't help.
+- **The mixed-radix rotation is the better default at d=768.** It avoids
+  padding 768 → 1024, so payloads are ~25% smaller *and* dequantize is
+  faster (less data through the WHT). Recall is within rounding of the
+  padded path at every bit width.
+- **Quality vs. size:** 4-bit retains ≥ 94% recall@100 at 8× compression
+  vs. fp32 (or 4× vs. fp16); 8-bit retains ≥ 99% at 4× / 2×.
+- **Dequant+BLAS is several times slower than `f32 (BLAS)`** because the
+  per-batch dequant step adds ~0.8 s on 1M × 768 before the matmul even
   starts. The trade is memory footprint: the quantized base is 4×–32×
-  smaller than the float32 base.
-- The earlier per-vector ADC API paid Highway's dynamic-dispatch cost on
-  every call, which dominated runtime at `padded_dim` ≤ 128. The current API
-  is **batched by default** (`AdcScore(..., payloads, stride, n, out)`): one
-  dispatch covers `n` payloads, so the inner SIMD FMA / norm-accumulator is
-  what's measured rather than the thunk. The numbers above were captured
-  before that change and will be re-run.
-- **The point of ADC isn't to beat sgemm at brute-force**; it's that the
-  base never has to be materialized as floats. ADC is the natural kernel for
-  cases where the float base doesn't fit in RAM/cache, for streaming /
-  per-shard scoring, or for rerank-on-quantized inside an ANN index.
+  smaller than the float32 base, so the win shows up when the float base
+  doesn't fit in RAM/cache, or in streaming / per-shard scoring.
