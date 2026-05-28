@@ -5,11 +5,12 @@
 #include <vector>
 
 #include "rotation.h"
+#include "rotator_padded.h"
 #include "turboquant/turboquant.h"
 
 using turboquant::ApplySigns;
 using turboquant::HadamardTransform;
-using turboquant::Rotator;
+using turboquant::internal::RotatorPadded;
 
 namespace {
 float L2Norm(const float* v, size_t n) {
@@ -59,7 +60,7 @@ TEST(Rotation, RotatorPreservesInnerProduct) {
       x[i] = dist(rng);
       y[i] = dist(rng);
     }
-    Rotator R(dim, 42);
+    RotatorPadded R(dim, 42);
     std::vector<float> xr(R.padded_dim()), yr(R.padded_dim());
     R.Apply(x.data(), xr.data());
     R.Apply(y.data(), yr.data());
@@ -149,7 +150,7 @@ TEST(Rotation, RotatorInverseRoundtrip) {
     std::vector<float> x(dim);
     for (size_t i = 0; i < dim; ++i) x[i] = dist(rng);
 
-    Rotator R(dim, 7);
+    RotatorPadded R(dim, 7);
     std::vector<float> rotated(R.padded_dim());
     R.Apply(x.data(), rotated.data());
     std::vector<float> back(dim);

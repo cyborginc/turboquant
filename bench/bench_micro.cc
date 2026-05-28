@@ -7,11 +7,8 @@
 
 namespace {
 
-using turboquant::Dequantize;
-using turboquant::PayloadSize;
 using turboquant::QuantBits;
-using turboquant::Quantize;
-using turboquant::Rotator;
+using turboquant::Quantizer;
 
 std::vector<float> RandomVec(size_t n, uint64_t seed) {
   std::mt19937_64 rng(seed);
@@ -24,11 +21,11 @@ std::vector<float> RandomVec(size_t n, uint64_t seed) {
 constexpr size_t kDim = 128;
 
 void BM_Quant(benchmark::State& state, QuantBits bits) {
-  Rotator R(kDim, 0xCAFE);
+  Quantizer q(kDim, bits, /*seed=*/0xCAFE);
   auto x = RandomVec(kDim, 1);
-  std::vector<uint8_t> payload(PayloadSize(kDim, bits));
+  std::vector<uint8_t> payload(q.payload_bytes());
   for (auto _ : state) {
-    Quantize(R, bits, x.data(), payload.data());
+    q.Quantize(x.data(), 1, payload.data());
     benchmark::DoNotOptimize(payload);
   }
   state.SetItemsProcessed(state.iterations());
@@ -36,13 +33,13 @@ void BM_Quant(benchmark::State& state, QuantBits bits) {
 }
 
 void BM_Dequant(benchmark::State& state, QuantBits bits) {
-  Rotator R(kDim, 0xCAFE);
+  Quantizer q(kDim, bits, /*seed=*/0xCAFE);
   auto x = RandomVec(kDim, 1);
-  std::vector<uint8_t> payload(PayloadSize(kDim, bits));
-  Quantize(R, bits, x.data(), payload.data());
+  std::vector<uint8_t> payload(q.payload_bytes());
+  q.Quantize(x.data(), 1, payload.data());
   std::vector<float> out(kDim);
   for (auto _ : state) {
-    Dequantize(R, bits, payload.data(), out.data());
+    q.Dequantize(payload.data(), 1, out.data());
     benchmark::DoNotOptimize(out);
   }
   state.SetItemsProcessed(state.iterations());
@@ -52,6 +49,7 @@ void BM_Dequant(benchmark::State& state, QuantBits bits) {
 #define REGISTER_ALL(name, fn)                                                    \
   BENCHMARK_CAPTURE(fn, name##_b1, QuantBits::B1);                                \
   BENCHMARK_CAPTURE(fn, name##_b2, QuantBits::B2);                                \
+  BENCHMARK_CAPTURE(fn, name##_b3, QuantBits::B3);                                \
   BENCHMARK_CAPTURE(fn, name##_b4, QuantBits::B4);                                \
   BENCHMARK_CAPTURE(fn, name##_b6, QuantBits::B6);                                \
   BENCHMARK_CAPTURE(fn, name##_b8, QuantBits::B8);                                \

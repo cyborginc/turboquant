@@ -56,9 +56,13 @@ inline void Fp16ToFp32(const uint16_t* src, size_t n, float* dst) {
 
 namespace {
 
-using turboquant::PayloadSize;
 using turboquant::QuantBits;
-using turboquant::Rotator;
+using turboquant::Quantizer;
+using turboquant::internal::RotatorPadded;
+// The bench uses the internal rotator types directly for the head-to-head;
+// the public Quantizer auto-routes between them but we want explicit access
+// to each path here.
+using Rotator = RotatorPadded;
 
 struct Dataset {
   size_t dim;
@@ -296,7 +300,7 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 #endif
   for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
-    const size_t ps = PayloadSize(ds.dim, b);
+    const size_t ps = turboquant::internal::PayloadSizePadded(ds.dim, b);
     payload_sizes[bi] = ps;
     all_payloads[bi].assign(ps * ds.n_train, 0);
     const double t0 = Now();
