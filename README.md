@@ -1,7 +1,7 @@
 # turboquant
 
 A C++17 library implementing the TurboQuant raw-vector quantization scheme.
-The public surface is a single class — `turboquant::Quantizer` — that picks
+The public surface is a single class (`turboquant::Quantizer`) that picks
 the rotation and quantization paths appropriate for the requested
 `(dim, bits)` at construction time.
 
@@ -27,58 +27,6 @@ q.Dequantize(payloads.data(), n, recon.data());
 `Quantize`/`Dequantize` are batched (`n = 1` is the single-vector case),
 zero-allocation on the hot path, and safe to call concurrently against the
 same `Quantizer` from multiple threads.
-
-## Auto-routing
-
-`Quantizer` picks two things automatically:
-
-- **Rotation.** For `dim = 3·2^k` (common embedding sizes 768, 1536, 3072) a
-  mixed-radix orthogonal rotation operates on the unpadded vector — ~25%
-  smaller payloads than the padded path. Otherwise: zero-pad to the next
-  power of two, sign-flip, Walsh-Hadamard.
-- **Quantization.** For `bits ∈ {1,2,3,4,6}` a Lloyd-Max codebook tuned to
-  the rotated coordinate distribution (`Beta((d-1)/2, (d-1)/2)`). For
-  `bits ∈ {8,12}` uniform-step affine, where the codebook no longer helps.
-
-Supported bit widths: `B1, B2, B3, B4, B6, B8, B12`. Codebook construction
-is ~10–200 ms at d=768; encode/decode are zero-allocation after that.
-
-## Build
-
-Requires CMake ≥ 3.16 and a C++17 compiler. Required: Google Highway
-(linked from the system, otherwise fetched at configure time). Optional:
-GoogleTest, google-benchmark, HDF5 + BLAS (for the dataset bench; macOS
-uses Accelerate automatically).
-
-```
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-ctest --test-dir build
-./build/turboquant_bench
-./build/turboquant_dataset_bench datasets/glove-25-angular.hdf5 10 1000
-```
-
-Ubuntu 24.04 deps:
-
-```
-sudo apt-get install libhwy-dev libgtest-dev libbenchmark-dev libhdf5-dev libopenblas-dev
-```
-
-CMake options: `-DTURBOQUANT_BUILD_TESTS=OFF`,
-`-DTURBOQUANT_BUILD_BENCH=OFF`, `-DTURBOQUANT_BUILD_DATASET_BENCH=OFF`.
-
-## Payload format
-
-```
-offset  size    field
-0       4       scale (IEEE-754 float32, little-endian)
-4       N       packed codes, N = ceil(code_dim * bits / 8)
-```
-
-`code_dim = dim` on the mixed-radix path, `next_pow2(dim)` on the padded
-path. Codes are a little-endian bitstream: code `i` at bits
-`[i*bits, (i+1)*bits)`. `Quantizer::PayloadBytes(dim, bits)` returns the
-total.
 
 ## Benchmarks — wiki-all-1M, d=768, 1M base × 1k queries, recall@100
 
@@ -145,3 +93,46 @@ b1    ▋                      100               ███            30.72x
   dequant dominates. The win is footprint: useful when the float base
   doesn't fit in RAM/cache, in streaming / per-shard scoring, or as a
   rerank stage inside an ANN index.
+
+## Auto-routing
+
+`Quantizer` picks two things automatically:
+
+- **Rotation.** For `dim = 3·2^k` (common embedding sizes 768, 1536, 3072) a
+  mixed-radix orthogonal rotation operates on the unpadded vector — ~25%
+  smaller payloads than the padded path. Otherwise: zero-pad to the next
+  power of two, sign-flip, Walsh-Hadamard.
+- **Quantization.** For `bits ∈ {1,2,3,4,6}` a Lloyd-Max codebook tuned to
+  the rotated coordinate distribution (`Beta((d-1)/2, (d-1)/2)`). For
+  `bits ∈ {8,12}` uniform-step affine, where the codebook no longer helps.
+
+Supported bit widths: `B1, B2, B3, B4, B6, B8, B12`. Codebook construction
+is ~10–200 ms at d=768; encode/decode are zero-allocation after that.
+
+## Payload format
+
+```
+offset  size    field
+0       4       scale (IEEE-754 float32, little-endian)
+4       N       packed codes, N = ceil(code_dim * bits / 8)
+```
+
+`code_dim = dim` on the mixed-radix path, `next_pow2(dim)` on the padded
+path. Codes are a little-endian bitstream: code `i` at bits
+`[i*bits, (i+1)*bits)`. `Quantizer::PayloadBytes(dim, bits)` returns the
+total.
+
+## Build
+
+Requires CMake ≥ 3.16 and a C++17 compiler. Required: Google Highway
+(linked from the system, otherwise fetched at configure time). Optional:
+GoogleTest, google-benchmark, HDF5 + BLAS (for the dataset bench; macOS
+uses Accelerate automatically).
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build
+./build/turboquant_bench
+./build/turboquant_dataset_bench datasets/glove-25-angular.hdf5 10 1000
+```
