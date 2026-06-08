@@ -221,7 +221,10 @@ float Recall(const std::vector<int32_t>& pred, const int32_t* truth, int k) {
 void NormalizeRows(float* data, size_t n, size_t d) {
   for (size_t i = 0; i < n; ++i) {
     double s = 0;
-    for (size_t j = 0; j < d; ++j) s += data[i * d + j] * data[i * d + j];
+    for (size_t j = 0; j < d; ++j) {
+      const double v = data[i * d + j];
+      s += v * v;
+    }
     float inv = s > 0 ? 1.0f / static_cast<float>(std::sqrt(s)) : 0.0f;
     for (size_t j = 0; j < d; ++j) data[i * d + j] *= inv;
   }
@@ -481,8 +484,10 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     base_norms2.resize(ds.n_train);
     for (size_t j = 0; j < ds.n_train; ++j) {
       double s = 0;
-      for (size_t d = 0; d < ds.dim; ++d)
-        s += ds.train[j * ds.dim + d] * ds.train[j * ds.dim + d];
+      for (size_t d = 0; d < ds.dim; ++d) {
+        const double v = ds.train[j * ds.dim + d];
+        s += v * v;
+      }
       base_norms2[j] = static_cast<float>(s);
     }
   }
@@ -619,7 +624,7 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
       for (size_t j = 0; j < ds.n_train; ++j) {
         double s = 0;
         for (size_t d = 0; d < ds.dim; ++d) {
-          const float vv = dequant_buf[j * ds.dim + d];
+          const double vv = dequant_buf[j * ds.dim + d];
           s += vv * vv;
         }
         deq_norms2[j] = static_cast<float>(s);
@@ -682,7 +687,7 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
       for (size_t j = 0; j < ds.n_train; ++j) {
         double s = 0;
         for (size_t d = 0; d < ds.dim; ++d) {
-          const float vv = dequant_buf[j * ds.dim + d];
+          const double vv = dequant_buf[j * ds.dim + d];
           s += vv * vv;
         }
         deq_norms2[j] = static_cast<float>(s);
