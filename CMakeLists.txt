@@ -27,8 +27,27 @@ option(TURBOQUANT_BUILD_DATASET_BENCH "Build HDF5 dataset bench (needs HDF5+BLAS
 # tests/test_golden.cc), so the version does not affect the on-disk format.
 set(TURBOQUANT_HWY_GIT_TAG "1.4.0" CACHE STRING
     "Highway version to fetch when no existing Highway is supplied or found")
+# Skip all discovery and fetch TURBOQUANT_HWY_GIT_TAG unconditionally. CI needs
+# this to actually test the version it asked for: CMAKE_DISABLE_FIND_PACKAGE_HWY
+# suppresses find_package but not the find_path/find_library below, so a runner
+# with a host libhwy would silently test that instead.
+option(TURBOQUANT_FORCE_FETCH_HWY "Always fetch Highway, ignoring any host copy" OFF)
 
-if(TARGET hwy)
+if(TURBOQUANT_FORCE_FETCH_HWY)
+  include(FetchContent)
+  FetchContent_Declare(
+    highway
+    GIT_REPOSITORY https://github.com/google/highway.git
+    GIT_TAG ${TURBOQUANT_HWY_GIT_TAG}
+  )
+  set(HWY_ENABLE_CONTRIB OFF CACHE BOOL "" FORCE)
+  set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(highway)
+  set(TURBOQUANT_HWY_TARGET hwy)
+  set(TURBOQUANT_HWY_ORIGIN "force-fetched ${TURBOQUANT_HWY_GIT_TAG}")
+elseif(TARGET hwy)
   # 1. Parent already declared a Highway target (FetchContent/add_subdirectory).
   #    Nothing to find: reuse it verbatim.
   set(TURBOQUANT_HWY_TARGET hwy)
@@ -126,7 +145,9 @@ if(TURBOQUANT_BUILD_TESTS)
     tests/test_robustness.cc
   )
   target_include_directories(turboquant_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-  target_link_libraries(turboquant_tests PRIVATE turboquant GTest::gtest GTest::gtest_main)
+  # gtest_main already carries gtest; naming both makes the linker warn about a
+  # duplicate archive.
+  target_link_libraries(turboquant_tests PRIVATE turboquant GTest::gtest_main)
   if(NOT MSVC)
     target_compile_options(turboquant_tests PRIVATE -O2 -g)
   endif()

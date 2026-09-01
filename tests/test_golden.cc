@@ -18,6 +18,7 @@
 #include <cstring>
 #include <gtest/gtest.h>
 #include <hwy/targets.h>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -238,8 +239,20 @@ TEST(GoldenLayout, LiteralBytesForOneVector) {
 // SSE4/AVX2/AVX-512 spread, which is where a lane-width difference would show.
 TEST(GoldenFormat, EncodingIsIdenticalAcrossSimdTargets) {
   const std::vector<int64_t> targets = hwy::SupportedAndGeneratedTargets();
+
+  // Log the coverage: which targets a given CI runner exercises depends on its
+  // CPU, so a green check is only meaningful alongside the list it compared.
+  std::string target_list;
+  for (int64_t t : targets) {
+    if (!target_list.empty()) target_list += ", ";
+    target_list += hwy::TargetName(t);
+  }
+  std::cout << "[ TARGETS  ] comparing encodings across: " << target_list
+            << std::endl;
+
   if (targets.size() < 2) {
-    GTEST_SKIP() << "only one SIMD target available on this host";
+    GTEST_SKIP() << "only one SIMD target available on this host ("
+                 << target_list << ")";
   }
 
   struct Restore {

@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Encoded payloads are a persisted format (cyborgdb-core writes them to disk),
+  # so this matrix exists to prove the bytes do not depend on the machine that
+  # produced them. The two runners cover the lane-width spread that matters:
+  # x86_64 generates the SSE4/AVX2/AVX-512 targets, which is where a horizontal
+  # reduction could regroup its partial sums, and arm64 covers NEON.
+  test:
+    name: ${{ matrix.os }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: macos-latest
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      # The golden tests only mean something if you can see which architecture
+      # and SIMD targets produced them, so record that up front.
+      - name: Environment
+        run: |
+          echo "runner:   ${{ matrix.os }}"
+          echo "arch:     $(uname -m)  (expected ${{ matrix.arch }})"
+          echo "kernel:   $(uname -sr)"
+          echo "compiler: $(c++ --version | head -1)"
+          if [ "$(uname -s)" = "Linux" ]; then
+            echo "cpu:      $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+            echo "simd:     $(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' \
+                              | grep -E '^(sse4_2|avx|avx2|avx512f|avx512bw|avx512vl)$' \
+                              | tr '\n' ' ')"
+          else
+            echo "cpu:      $(sysctl -n machdep.cpu.brand_string)"
+            echo "simd:     $(sysctl -n hw.optional.neon >/dev/null 2>&1 && echo neon)"
+          fi
+          test "$(uname -m)" = "${{ matrix.arch }}" \
+            || echo "::warning::runner arch $(uname -m) != expected ${{ matrix.arch }}"
+
+      # Force the fetch so the job tests the tag this repo pins, not whatever
+      # libhwy the runner image happens to ship.
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTURBOQUANT_FORCE_FETCH_HWY=ON \
+            -DTURBOQUANT_BUILD_BENCH=OFF \
+            -DTURBOQUANT_BUILD_DATASET_BENCH=OFF
+
+      - name: Verify Highway came from the pinned tag
+        run: |
+          test -f build/_deps/highway-src/hwy/highway.h \
+            || { echo "::error::Highway was not fetched; a host copy was used"; exit 1; }
+          echo "highway: $(git -C build/_deps/highway-src describe --tags)"
+
+      - name: Build
+        run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # Surfaced separately so a format break is obvious in the job list rather
+      # than buried in the full suite's output. The SIMD-target test logs which
+      # targets it actually compared on this runner.
+      - name: Format stability (golden bytes)
+        run: ./build/turboquant_tests --gtest_filter='Golden*'
+
+  # The public header promises Quantize/Dequantize are safe to call concurrently
+  # on a shared Quantizer, and the Beta codebooks are memoized behind a
+  # double-checked atomic. TSan is what actually holds that contract.
+  sanitizers:
+    name: ${{ matrix.sanitizer }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: thread
+            flags: '-fsanitize=thread -g -O1'
+          - sanitizer: address-undefined
+            flags: '-fsanitize=address,undefined -fno-sanitize-recover=undefined -g -O1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DTURBOQUANT_FORCE_FETCH_HWY=ON \
+            -DTURBOQUANT_BUILD_BENCH=OFF \
+            -DTURBOQUANT_BUILD_DATASET_BENCH=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
