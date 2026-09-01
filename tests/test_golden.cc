@@ -1,10 +1,11 @@
 // Format-stability tests.
 //
-// TurboQuant payloads are written to disk by downstream consumers (cyborgdb-core
-// stores them as the Stage-2 rerank vectors) and decoded by whatever library
-// version is linked at read time. The encoded bytes are therefore a persisted
-// format, not an implementation detail: changing the rotation, the Lloyd-Max
-// codebook, or the bit packing silently invalidates every stored index.
+// TurboQuant payloads are written to disk by downstream consumers
+// (cyborgdb-core stores them as the Stage-2 rerank vectors) and decoded by
+// whatever library version is linked at read time. The encoded bytes are
+// therefore a persisted format, not an implementation detail: changing the
+// rotation, the Lloyd-Max codebook, or the bit packing silently invalidates
+// every stored index.
 //
 // These tests pin that format. A failure here is not necessarily a bug — it may
 // be a deliberate format change — but it MUST be accompanied by a version bump
@@ -13,13 +14,14 @@
 
 #include "turboquant/turboquant.h"
 
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
 #include <gtest/gtest.h>
 #include <hwy/targets.h>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -27,10 +29,11 @@ namespace {
 using turboquant::QuantBits;
 using turboquant::Quantizer;
 
-// Deterministic input generation, deliberately NOT using <random> distributions.
-// std::normal_distribution and friends are implementation-defined, so goldens
-// built with libstdc++ would not reproduce under libc++. SplitMix64 plus a
-// fixed int->float mapping is portable across compilers and platforms.
+// Deterministic input generation, deliberately NOT using <random>
+// distributions. std::normal_distribution and friends are
+// implementation-defined, so goldens built with libstdc++ would not reproduce
+// under libc++. SplitMix64 plus a fixed int->float mapping is portable across
+// compilers and platforms.
 uint64_t SplitMix64(uint64_t& state) {
   state += 0x9E3779B97F4A7C15ULL;
   uint64_t z = state;
@@ -81,21 +84,22 @@ struct GoldenCase {
 
 // dim=768 exercises the mixed-radix path (dim = 3 * 2^k, no padding);
 // dim=1000 exercises the padded Walsh-Hadamard path (padded to 1024).
-// Generated on 2026-09-01 against NEON and NEON_BF16, which agree byte-for-byte.
+// Generated on 2026-09-01 against NEON and NEON_BF16, which agree
+// byte-for-byte.
 const GoldenCase kGoldens[] = {
-    { 768, QuantBits::B1,   100, 0xcb4a051656fee950ULL},
-    { 768, QuantBits::B2,   196, 0xd62a6d4f26be77f2ULL},
-    { 768, QuantBits::B3,   292, 0x7b3e21c3c8917a38ULL},
-    { 768, QuantBits::B4,   388, 0x3660bf9b46eebf1eULL},
-    { 768, QuantBits::B6,   580, 0x64cf5dc2348f3dccULL},
-    { 768, QuantBits::B8,   772, 0x0d551a221d5c1083ULL},
-    { 768, QuantBits::B12, 1156, 0xaaf57915702bfbe1ULL},
-    {1000, QuantBits::B1,   132, 0x610f86d29d2be84bULL},
-    {1000, QuantBits::B2,   260, 0x2730ddfc518f4467ULL},
-    {1000, QuantBits::B3,   388, 0x08065455cbfe5539ULL},
-    {1000, QuantBits::B4,   516, 0x5ff28fa94fa6fb3cULL},
-    {1000, QuantBits::B6,   772, 0x870af48f78625134ULL},
-    {1000, QuantBits::B8,  1028, 0xa8740ef639b69c21ULL},
+    {768, QuantBits::B1, 100, 0xcb4a051656fee950ULL},
+    {768, QuantBits::B2, 196, 0xd62a6d4f26be77f2ULL},
+    {768, QuantBits::B3, 292, 0x7b3e21c3c8917a38ULL},
+    {768, QuantBits::B4, 388, 0x3660bf9b46eebf1eULL},
+    {768, QuantBits::B6, 580, 0x64cf5dc2348f3dccULL},
+    {768, QuantBits::B8, 772, 0x0d551a221d5c1083ULL},
+    {768, QuantBits::B12, 1156, 0xaaf57915702bfbe1ULL},
+    {1000, QuantBits::B1, 132, 0x610f86d29d2be84bULL},
+    {1000, QuantBits::B2, 260, 0x2730ddfc518f4467ULL},
+    {1000, QuantBits::B3, 388, 0x08065455cbfe5539ULL},
+    {1000, QuantBits::B4, 516, 0x5ff28fa94fa6fb3cULL},
+    {1000, QuantBits::B6, 772, 0x870af48f78625134ULL},
+    {1000, QuantBits::B8, 1028, 0xa8740ef639b69c21ULL},
     {1000, QuantBits::B12, 1540, 0x0715d4afb343192dULL},
 };
 
@@ -122,10 +126,9 @@ TEST(GoldenFormat, EncodedBytesAreStable) {
 TEST(GoldenFormat, PayloadSizeFormula) {
   // Mixed-radix dims (3 * 2^k) pack the true dim with no padding.
   for (size_t dim : {size_t{768}, size_t{1536}, size_t{3072}}) {
-    for (QuantBits b : {QuantBits::B4, QuantBits::B6, QuantBits::B8,
-                        QuantBits::B12}) {
-      const size_t expect =
-          4 + (dim * static_cast<size_t>(b) + 7) / 8;
+    for (QuantBits b :
+         {QuantBits::B4, QuantBits::B6, QuantBits::B8, QuantBits::B12}) {
+      const size_t expect = 4 + (dim * static_cast<size_t>(b) + 7) / 8;
       EXPECT_EQ(Quantizer::PayloadBytes(dim, b), expect)
           << "dim=" << dim << " bits=" << static_cast<int>(b);
     }

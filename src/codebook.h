@@ -33,8 +33,12 @@ class BetaCodebook {
   // total length is exactly num_levels / 2 — a power of two suitable for
   // branch-free binary search. boundaries[num_levels/2 - 1] (= 0) is the
   // symmetry axis and is implicit in the encode.
-  const float* positive_boundaries_padded() const { return pos_bounds_pad_.data(); }
-  size_t positive_boundaries_padded_size() const { return pos_bounds_pad_.size(); }
+  const float* positive_boundaries_padded() const {
+    return pos_bounds_pad_.data();
+  }
+  size_t positive_boundaries_padded_size() const {
+    return pos_bounds_pad_.size();
+  }
 
  private:
   std::vector<float> boundaries_;

@@ -1,7 +1,11 @@
+// clang-format off
+// foreach_target.h must precede highway.h and both must lead the file: this
+// translation unit re-includes itself once per SIMD target. Do not reorder.
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "kernels.cc"
 #include <hwy/foreach_target.h>
 #include <hwy/highway.h>
+// clang-format on
 
 #include <cmath>
 #include <cstddef>
@@ -32,8 +36,8 @@ float MaxAbsImpl(const float* data, size_t n) {
   return m;
 }
 
-void QuantizeAffineImpl(const float* data, size_t n, float scale, int zero_point,
-                        int max_code, uint16_t* codes_out) {
+void QuantizeAffineImpl(const float* data, size_t n, float scale,
+                        int zero_point, int max_code, uint16_t* codes_out) {
   const float inv_scale = 1.0f / scale;
   const hn::ScalableTag<float> df;
   const hn::Rebind<int32_t, decltype(df)> di32;
@@ -239,13 +243,13 @@ void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
 void EncodeBetaCodebook(const float* values, size_t n,
                         const float* pos_bounds_pad, QuantBits bits,
                         uint16_t* codes_out) {
-  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)(values, n, pos_bounds_pad, bits,
-                                               codes_out);
+  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)
+  (values, n, pos_bounds_pad, bits, codes_out);
 }
 void DecodeBetaCodebook(const uint16_t* codes, size_t n, const float* centroids,
                         float scale, float* data_out) {
-  HWY_DYNAMIC_DISPATCH(DecodeBetaCodebookImpl)(codes, n, centroids, scale,
-                                               data_out);
+  HWY_DYNAMIC_DISPATCH(DecodeBetaCodebookImpl)
+  (codes, n, centroids, scale, data_out);
 }
 float CentroidInnerProduct(const float* values, const uint16_t* codes, size_t n,
                            const float* centroids) {

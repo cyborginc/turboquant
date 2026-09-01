@@ -11,8 +11,8 @@ namespace turboquant {
 // Max absolute value over a contiguous float array.
 float MaxAbs(const float* data, size_t n);
 
-// codes_out[i] = clamp(round(data[i]/scale), -zp, zp-1) + zp, for non-1-bit modes.
-// `zero_point = 1 << (bits-1)`, `max_code = (1 << bits) - 1`.
+// codes_out[i] = clamp(round(data[i]/scale), -zp, zp-1) + zp, for non-1-bit
+// modes. `zero_point = 1 << (bits-1)`, `max_code = (1 << bits) - 1`.
 void QuantizeAffine(const float* data, size_t n, float scale, int zero_point,
                     int max_code, uint16_t* codes_out);
 
@@ -27,10 +27,10 @@ void DequantizeAffine(const uint16_t* codes, size_t n, float scale,
 void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
                       float* data_out);
 
-// Beta-codebook encode. For each input value, code = |{k : value > boundaries[k]}|.
-// Uses a templated branch-free binary search over the positive-half boundaries
-// (the codebook is symmetric around zero), reducing the per-coord work from
-// O(2^bits) compares to O(bits).
+// Beta-codebook encode. For each input value, code = |{k : value >
+// boundaries[k]}|. Uses a templated branch-free binary search over the
+// positive-half boundaries (the codebook is symmetric around zero), reducing
+// the per-coord work from O(2^bits) compares to O(bits).
 //
 // `pos_bounds_pad` is the codebook's positive_boundaries_padded() (length
 // 2^(bits-1), padded with +inf at the tail). `bits` selects the templated

@@ -127,10 +127,8 @@ void QuantizeMixed3(const RotatorMixed3& rot, QuantBits bits, const float* x,
   EncodeBetaCodebook(rotated, d, cb->positive_boundaries_padded(), bits, codes);
 
   // scale = ||v|| / <u_rot, x_hat>.
-  const float inner =
-      CentroidInnerProduct(rotated, codes, d, cb->centroids());
-  const float scale_eff =
-      std::abs(inner) > 1e-20f ? norm / inner : norm;
+  const float inner = CentroidInnerProduct(rotated, codes, d, cb->centroids());
+  const float scale_eff = std::abs(inner) > 1e-20f ? norm / inner : norm;
 
   std::memcpy(payload_out, &scale_eff, sizeof(float));
   PackCodes(codes, d, bits, payload_out + kHeaderBytes);

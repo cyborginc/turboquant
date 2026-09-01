@@ -99,6 +99,15 @@ endif()
 # resolution visible in every configure log.
 message(STATUS "TurboQuant Highway: ${TURBOQUANT_HWY_ORIGIN}")
 
+# Treat Highway's headers as system headers. We build with -Wpedantic, which
+# Highway's base.h trips (__int128, variadic macro pasting) once per translation
+# unit — eight warnings that are not actionable here and that bury any real one.
+get_target_property(_tq_hwy_inc ${TURBOQUANT_HWY_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
+if(_tq_hwy_inc)
+  set_target_properties(${TURBOQUANT_HWY_TARGET} PROPERTIES
+                        INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_tq_hwy_inc}")
+endif()
+
 # --- Library ----------------------------------------------------------------
 add_library(turboquant
   src/turboquant.cc
@@ -115,7 +124,16 @@ target_include_directories(turboquant
 target_link_libraries(turboquant PUBLIC ${TURBOQUANT_HWY_TARGET})
 
 if(NOT MSVC)
-  target_compile_options(turboquant PRIVATE -Wall -Wextra -Wpedantic -O3)
+  # -ffp-contract=off is load-bearing, not a style choice. Encoded payloads are a
+  # persisted format, and GCC defaults to -ffp-contract=fast while Clang defaults
+  # to =on: the resulting 1-ULP differences are amplified by the Lloyd-Max
+  # iteration and the codebook inner products until coordinates land in different
+  # quantization bins, so the two compilers emit different bytes for identical
+  # input. Verified: with contraction on, GCC 16 and Clang disagree on the golden
+  # payloads; with it off they agree exactly. Costs ~9% on Beta-path encode
+  # (one-time ingest) and nothing measurable on decode.
+  target_compile_options(turboquant PRIVATE -Wall -Wextra -Wpedantic -O3
+                                            -ffp-contract=off)
 endif()
 
 # --- Tests ------------------------------------------------------------------

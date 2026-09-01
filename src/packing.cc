@@ -86,15 +86,14 @@ void PackB3(const uint16_t* codes, size_t n, uint8_t* out) {
   size_t i = 0;
   while (i + 8 <= n) {
     const size_t byte_off = 3 * (i / 8);
-    const uint32_t v =
-        (static_cast<uint32_t>(codes[i + 0] & 0x7) << 0) |
-        (static_cast<uint32_t>(codes[i + 1] & 0x7) << 3) |
-        (static_cast<uint32_t>(codes[i + 2] & 0x7) << 6) |
-        (static_cast<uint32_t>(codes[i + 3] & 0x7) << 9) |
-        (static_cast<uint32_t>(codes[i + 4] & 0x7) << 12) |
-        (static_cast<uint32_t>(codes[i + 5] & 0x7) << 15) |
-        (static_cast<uint32_t>(codes[i + 6] & 0x7) << 18) |
-        (static_cast<uint32_t>(codes[i + 7] & 0x7) << 21);
+    const uint32_t v = (static_cast<uint32_t>(codes[i + 0] & 0x7) << 0) |
+                       (static_cast<uint32_t>(codes[i + 1] & 0x7) << 3) |
+                       (static_cast<uint32_t>(codes[i + 2] & 0x7) << 6) |
+                       (static_cast<uint32_t>(codes[i + 3] & 0x7) << 9) |
+                       (static_cast<uint32_t>(codes[i + 4] & 0x7) << 12) |
+                       (static_cast<uint32_t>(codes[i + 5] & 0x7) << 15) |
+                       (static_cast<uint32_t>(codes[i + 6] & 0x7) << 18) |
+                       (static_cast<uint32_t>(codes[i + 7] & 0x7) << 21);
     std::memcpy(out + byte_off, &v, 3);  // low 24 bits
     i += 8;
   }
@@ -152,15 +151,14 @@ void PackB6(const uint16_t* codes, size_t n, uint8_t* out) {
   size_t i = 0;
   while (i + 8 <= n) {
     const size_t byte_off = 6 * (i / 8);
-    const uint64_t v =
-        (static_cast<uint64_t>(codes[i + 0] & 0x3F) << 0) |
-        (static_cast<uint64_t>(codes[i + 1] & 0x3F) << 6) |
-        (static_cast<uint64_t>(codes[i + 2] & 0x3F) << 12) |
-        (static_cast<uint64_t>(codes[i + 3] & 0x3F) << 18) |
-        (static_cast<uint64_t>(codes[i + 4] & 0x3F) << 24) |
-        (static_cast<uint64_t>(codes[i + 5] & 0x3F) << 30) |
-        (static_cast<uint64_t>(codes[i + 6] & 0x3F) << 36) |
-        (static_cast<uint64_t>(codes[i + 7] & 0x3F) << 42);
+    const uint64_t v = (static_cast<uint64_t>(codes[i + 0] & 0x3F) << 0) |
+                       (static_cast<uint64_t>(codes[i + 1] & 0x3F) << 6) |
+                       (static_cast<uint64_t>(codes[i + 2] & 0x3F) << 12) |
+                       (static_cast<uint64_t>(codes[i + 3] & 0x3F) << 18) |
+                       (static_cast<uint64_t>(codes[i + 4] & 0x3F) << 24) |
+                       (static_cast<uint64_t>(codes[i + 5] & 0x3F) << 30) |
+                       (static_cast<uint64_t>(codes[i + 6] & 0x3F) << 36) |
+                       (static_cast<uint64_t>(codes[i + 7] & 0x3F) << 42);
     std::memcpy(out + byte_off, &v, 6);  // low 48 bits
     i += 8;
   }
@@ -172,7 +170,8 @@ void PackB6(const uint16_t* codes, size_t n, uint8_t* out) {
       const size_t bit_off = i * 6;
       const size_t bo = bit_off >> 3;
       const int shift = static_cast<int>(bit_off & 7);
-      const uint32_t shifted = (static_cast<uint32_t>(codes[i]) & 0x3F) << shift;
+      const uint32_t shifted = (static_cast<uint32_t>(codes[i]) & 0x3F)
+                               << shift;
       out[bo] |= static_cast<uint8_t>(shifted & 0xFF);
       if (shift + 6 > 8) {
         out[bo + 1] |= static_cast<uint8_t>((shifted >> 8) & 0xFF);
@@ -187,11 +186,10 @@ void PackB12(const uint16_t* codes, size_t n, uint8_t* out) {
   size_t i = 0;
   while (i + 4 <= n) {
     const size_t byte_off = 6 * (i / 4);
-    const uint64_t v =
-        (static_cast<uint64_t>(codes[i + 0] & 0xFFF) << 0) |
-        (static_cast<uint64_t>(codes[i + 1] & 0xFFF) << 12) |
-        (static_cast<uint64_t>(codes[i + 2] & 0xFFF) << 24) |
-        (static_cast<uint64_t>(codes[i + 3] & 0xFFF) << 36);
+    const uint64_t v = (static_cast<uint64_t>(codes[i + 0] & 0xFFF) << 0) |
+                       (static_cast<uint64_t>(codes[i + 1] & 0xFFF) << 12) |
+                       (static_cast<uint64_t>(codes[i + 2] & 0xFFF) << 24) |
+                       (static_cast<uint64_t>(codes[i + 3] & 0xFFF) << 36);
     std::memcpy(out + byte_off, &v, 6);
     i += 4;
   }
@@ -202,8 +200,8 @@ void PackB12(const uint16_t* codes, size_t n, uint8_t* out) {
       const size_t bit_off = i * 12;
       const size_t bo = bit_off >> 3;
       const int shift = static_cast<int>(bit_off & 7);
-      const uint32_t shifted =
-          (static_cast<uint32_t>(codes[i]) & 0xFFF) << shift;
+      const uint32_t shifted = (static_cast<uint32_t>(codes[i]) & 0xFFF)
+                               << shift;
       out[bo] |= static_cast<uint8_t>(shifted & 0xFF);
       out[bo + 1] |= static_cast<uint8_t>((shifted >> 8) & 0xFF);
       if (shift + 12 > 16) {
@@ -265,8 +263,7 @@ void UnpackB12(const uint8_t* in, size_t n, uint16_t* codes) {
     const int shift = static_cast<int>(bit_off & 7);
     uint32_t v32 = static_cast<uint32_t>(in[byte_off]) |
                    (static_cast<uint32_t>(in[byte_off + 1]) << 8);
-    if (shift + 12 > 16)
-      v32 |= static_cast<uint32_t>(in[byte_off + 2]) << 16;
+    if (shift + 12 > 16) v32 |= static_cast<uint32_t>(in[byte_off + 2]) << 16;
     codes[i] = static_cast<uint16_t>((v32 >> shift) & 0xFFF);
   }
 }

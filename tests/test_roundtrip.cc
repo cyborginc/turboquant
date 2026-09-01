@@ -65,13 +65,27 @@ TEST_P(RoundtripTest, MseDecreasesWithBits) {
   const double var = Variance(x.data(), dim);
   const double snr = var / std::max(mse, 1e-30);
   switch (bits) {
-    case QuantBits::B1:  EXPECT_GT(snr, 0.3);  break;
-    case QuantBits::B2:  EXPECT_GT(snr, 1.5);  break;
-    case QuantBits::B3:  EXPECT_GT(snr, 6.0);  break;
-    case QuantBits::B4:  EXPECT_GT(snr, 30.0); break;
-    case QuantBits::B6:  EXPECT_GT(snr, 200.0); break;
-    case QuantBits::B8:  EXPECT_GT(snr, 5000.0); break;
-    case QuantBits::B12: EXPECT_GT(snr, 1e5);  break;
+    case QuantBits::B1:
+      EXPECT_GT(snr, 0.3);
+      break;
+    case QuantBits::B2:
+      EXPECT_GT(snr, 1.5);
+      break;
+    case QuantBits::B3:
+      EXPECT_GT(snr, 6.0);
+      break;
+    case QuantBits::B4:
+      EXPECT_GT(snr, 30.0);
+      break;
+    case QuantBits::B6:
+      EXPECT_GT(snr, 200.0);
+      break;
+    case QuantBits::B8:
+      EXPECT_GT(snr, 5000.0);
+      break;
+    case QuantBits::B12:
+      EXPECT_GT(snr, 1e5);
+      break;
   }
 }
 
@@ -174,7 +188,8 @@ TEST_P(BetaRoundtripTest, MseDecreasesWithBits) {
   std::vector<float> x(dim);
   for (size_t i = 0; i < dim; ++i) x[i] = dist(rng);
 
-  std::vector<uint8_t> payload(turboquant::internal::PayloadSizePadded(dim, bits));
+  std::vector<uint8_t> payload(
+      turboquant::internal::PayloadSizePadded(dim, bits));
   QuantizeBeta(R, bits, x.data(), payload.data());
   std::vector<float> y(dim);
   DequantizeBeta(R, bits, payload.data(), y.data());
@@ -183,13 +198,27 @@ TEST_P(BetaRoundtripTest, MseDecreasesWithBits) {
   const double var = Variance(x.data(), dim);
   const double snr = var / std::max(mse, 1e-30);
   switch (bits) {
-    case QuantBits::B1:  EXPECT_GT(snr, 0.3);  break;
-    case QuantBits::B2:  EXPECT_GT(snr, 1.5);  break;
-    case QuantBits::B3:  EXPECT_GT(snr, 6.0);  break;
-    case QuantBits::B4:  EXPECT_GT(snr, 30.0); break;
-    case QuantBits::B6:  EXPECT_GT(snr, 200.0); break;
-    case QuantBits::B8:  EXPECT_GT(snr, 1000.0); break;
-    case QuantBits::B12: EXPECT_GT(snr, 1e4); break;
+    case QuantBits::B1:
+      EXPECT_GT(snr, 0.3);
+      break;
+    case QuantBits::B2:
+      EXPECT_GT(snr, 1.5);
+      break;
+    case QuantBits::B3:
+      EXPECT_GT(snr, 6.0);
+      break;
+    case QuantBits::B4:
+      EXPECT_GT(snr, 30.0);
+      break;
+    case QuantBits::B6:
+      EXPECT_GT(snr, 200.0);
+      break;
+    case QuantBits::B8:
+      EXPECT_GT(snr, 1000.0);
+      break;
+    case QuantBits::B12:
+      EXPECT_GT(snr, 1e4);
+      break;
   }
 }
 

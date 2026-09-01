@@ -80,7 +80,8 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
   auto pdf = [a_m1](double x) { return BetaPDFUnnorm(x, a_m1); };
   auto xpdf = [a_m1](double x) { return x * BetaPDFUnnorm(x, a_m1); };
 
-  // Initial centroids spread within ±3 std. Var(Beta(a,a) on [-1,1]) = 1/(2a+1).
+  // Initial centroids spread within ±3 std. Var(Beta(a,a) on [-1,1]) =
+  // 1/(2a+1).
   const double std_dev = 1.0 / std::sqrt(2.0 * a + 1.0);
   const double spread = std::min(0.9, 3.0 * std_dev);
 
@@ -133,8 +134,7 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
   // on it.
   if (num_levels >= 2) {
     for (size_t i = 0; i < num_levels / 2; ++i) {
-      const double mag =
-          0.5 * (centroids[num_levels - 1 - i] - centroids[i]);
+      const double mag = 0.5 * (centroids[num_levels - 1 - i] - centroids[i]);
       centroids[i] = -mag;
       centroids[num_levels - 1 - i] = mag;
     }

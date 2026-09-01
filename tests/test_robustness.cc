@@ -8,12 +8,11 @@
 
 #include "turboquant/turboquant.h"
 
+#include <gtest/gtest.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
-#include <gtest/gtest.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -73,9 +72,8 @@ TEST(Robustness, ZeroVector) {
     const std::vector<float> y = RoundTrip(x, dim, bits);
     ExpectAllFinite(y, "zero vector", bits);
     for (float v : y) {
-      EXPECT_NEAR(v, 0.0f, 1e-6f)
-          << "zero vector should decode to zero (bits="
-          << static_cast<int>(bits) << ")";
+      EXPECT_NEAR(v, 0.0f, 1e-6f) << "zero vector should decode to zero (bits="
+                                  << static_cast<int>(bits) << ")";
     }
   }
 }
@@ -107,10 +105,9 @@ TEST(Robustness, SingleNonZeroCoordinate) {
       // The rotation spreads a spike across all coordinates, so reconstruction
       // is lossy at low bit widths; only require the spike stay dominant.
       const size_t argmax =
-          std::max_element(y.begin(), y.end(),
-                           [](float a, float b) {
-                             return std::fabs(a) < std::fabs(b);
-                           }) -
+          std::max_element(
+              y.begin(), y.end(),
+              [](float a, float b) { return std::fabs(a) < std::fabs(b); }) -
           y.begin();
       EXPECT_EQ(argmax, idx)
           << "one-hot spike moved (bits=" << static_cast<int>(bits)
@@ -133,8 +130,8 @@ TEST(Robustness, ExtremeMagnitudes) {
       const std::vector<float> y = RoundTrip(x, dim, bits);
       ExpectAllFinite(y, "extreme magnitude vector", bits);
       EXPECT_GT(Cosine(x, y), 0.90)
-          << "magnitude " << m << " lost direction (bits="
-          << static_cast<int>(bits) << ")";
+          << "magnitude " << m
+          << " lost direction (bits=" << static_cast<int>(bits) << ")";
     }
   }
 }
@@ -281,8 +278,8 @@ TEST(Robustness, ConcurrentQuantizeMatchesSerial) {
 // dim; everything else pads to the next power of two. Both must round-trip, and
 // the size difference is large enough that callers need to know which they get.
 TEST(Robustness, UnpaddedAndPaddedDimsRoundTrip) {
-  const size_t dims[] = {3, 6, 96, 384, 768, 1536,  // 3 * 2^k
-                         1, 2, 100, 128, 129, 512, 600, 1000, 1024, 1152};
+  const size_t dims[] = {3, 6, 96,  384, 768, 1536,  // 3 * 2^k
+                         1, 2, 100, 128, 129, 512,  600, 1000, 1024, 1152};
   for (size_t dim : dims) {
     for (QuantBits bits : {QuantBits::B4, QuantBits::B8}) {
       SCOPED_TRACE("dim=" + std::to_string(dim) +
@@ -318,6 +315,6 @@ TEST(Robustness, PaddingOverheadIsVisibleToCallers) {
   const size_t tq12_at_129 = Quantizer::PayloadBytes(129, QuantBits::B12);
   const size_t fp16_at_129 = 129 * sizeof(uint16_t);
   EXPECT_GT(tq12_at_129, fp16_at_129)
-      << "documented case: tq12 at dim=129 (padded to 256) costs " << tq12_at_129
-      << " B vs " << fp16_at_129 << " B for fp16";
+      << "documented case: tq12 at dim=129 (padded to 256) costs "
+      << tq12_at_129 << " B vs " << fp16_at_129 << " B for fp16";
 }

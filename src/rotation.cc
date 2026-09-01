@@ -1,7 +1,11 @@
+// clang-format off
+// foreach_target.h must precede highway.h and both must lead the file: this
+// translation unit re-includes itself once per SIMD target. Do not reorder.
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "rotation.cc"
 #include <hwy/foreach_target.h>
 #include <hwy/highway.h>
+// clang-format on
 
 #include <cmath>
 #include <cstddef>
@@ -14,7 +18,8 @@ namespace HWY_NAMESPACE {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-// Butterfly stride `h` on contiguous chunks of size 2*h: pair (a, b) -> (a+b, a-b).
+// Butterfly stride `h` on contiguous chunks of size 2*h: pair (a, b) -> (a+b,
+// a-b).
 void ButterflyStride(float* data, size_t n, size_t h) {
   const hn::ScalableTag<float> d;
   const size_t lanes = hn::Lanes(d);

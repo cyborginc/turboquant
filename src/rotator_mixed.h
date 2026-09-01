@@ -38,7 +38,8 @@ class RotatorMixed3 {
 
   size_t dim() const { return dim_; }
   const float* signs() const { return signs_.data(); }
-  // Codebook computed for the true (unpadded) dim. nullptr for unsupported bits.
+  // Codebook computed for the true (unpadded) dim. nullptr for unsupported
+  // bits.
   const BetaCodebook* beta_codebook(QuantBits bits) const;
 
   // Forward rotation: out[i] for i in [0, dim).

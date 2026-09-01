@@ -46,13 +46,13 @@ void BM_Dequant(benchmark::State& state, QuantBits bits) {
   state.SetBytesProcessed(state.iterations() * kDim * sizeof(float));
 }
 
-#define REGISTER_ALL(name, fn)                                                    \
-  BENCHMARK_CAPTURE(fn, name##_b1, QuantBits::B1);                                \
-  BENCHMARK_CAPTURE(fn, name##_b2, QuantBits::B2);                                \
-  BENCHMARK_CAPTURE(fn, name##_b3, QuantBits::B3);                                \
-  BENCHMARK_CAPTURE(fn, name##_b4, QuantBits::B4);                                \
-  BENCHMARK_CAPTURE(fn, name##_b6, QuantBits::B6);                                \
-  BENCHMARK_CAPTURE(fn, name##_b8, QuantBits::B8);                                \
+#define REGISTER_ALL(name, fn)                     \
+  BENCHMARK_CAPTURE(fn, name##_b1, QuantBits::B1); \
+  BENCHMARK_CAPTURE(fn, name##_b2, QuantBits::B2); \
+  BENCHMARK_CAPTURE(fn, name##_b3, QuantBits::B3); \
+  BENCHMARK_CAPTURE(fn, name##_b4, QuantBits::B4); \
+  BENCHMARK_CAPTURE(fn, name##_b6, QuantBits::B6); \
+  BENCHMARK_CAPTURE(fn, name##_b8, QuantBits::B8); \
   BENCHMARK_CAPTURE(fn, name##_b12, QuantBits::B12);
 
 REGISTER_ALL(Quant, BM_Quant)

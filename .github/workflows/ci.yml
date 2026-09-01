@@ -11,6 +11,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap and fails fast, so it runs alongside the build rather than gating it.
+  # clang-format output is not stable across major releases, so the version is
+  # pinned here and named in .clang-format for anyone reproducing locally.
+  format:
+    name: clang-format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+
+      - name: Check formatting
+        run: |
+          mapfile -t files < <(git ls-files '*.cc' '*.h')
+          echo "checking ${#files[@]} files"
+          clang-format-18 --style=file --dry-run --Werror "${files[@]}"
+
+      - name: Show diff on failure
+        if: failure()
+        run: |
+          mapfile -t files < <(git ls-files '*.cc' '*.h')
+          clang-format-18 --style=file -i "${files[@]}"
+          echo "::error::Formatting differs. Run: clang-format-18 --style=file -i \$(git ls-files '*.cc' '*.h')"
+          git --no-pager diff
+
   # Encoded payloads are a persisted format (cyborgdb-core writes them to disk),
   # so this matrix exists to prove the bytes do not depend on the machine that
   # produced them. The two runners cover the lane-width spread that matters:

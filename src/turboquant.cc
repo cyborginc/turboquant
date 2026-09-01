@@ -10,8 +10,8 @@
 #include "kernels.h"
 #include "packing.h"
 #include "rotation.h"
-#include "rotator_padded.h"
 #include "rotator_mixed.h"
+#include "rotator_padded.h"
 
 namespace turboquant {
 
@@ -103,8 +103,7 @@ void RotatorPadded::ApplyInverse(float* y_padded, float* out_dim) const {
 // ---------------------------------------------------------------------------
 
 size_t PayloadSizePadded(size_t dim, QuantBits bits) {
-  const size_t total_bits =
-      NextPow2(dim) * static_cast<size_t>(BitsInt(bits));
+  const size_t total_bits = NextPow2(dim) * static_cast<size_t>(BitsInt(bits));
   return kHeaderBytes + (total_bits + 7) / 8;
 }
 
@@ -156,12 +155,11 @@ void QuantizeBeta(const RotatorPadded& rot, QuantBits bits, const float* x,
   if (pd > d) std::memset(rotated + d, 0, (pd - d) * sizeof(float));
   ForwardRotate(rotated, rot.signs(), pd);
 
-  EncodeBetaCodebook(rotated, pd, cb->positive_boundaries_padded(), bits, codes);
+  EncodeBetaCodebook(rotated, pd, cb->positive_boundaries_padded(), bits,
+                     codes);
 
-  const float inner =
-      CentroidInnerProduct(rotated, codes, pd, cb->centroids());
-  const float scale_eff =
-      std::abs(inner) > 1e-20f ? norm / inner : norm;
+  const float inner = CentroidInnerProduct(rotated, codes, pd, cb->centroids());
+  const float scale_eff = std::abs(inner) > 1e-20f ? norm / inner : norm;
 
   std::memcpy(payload_out, &scale_eff, sizeof(float));
   PackCodes(codes, pd, bits, payload_out + kHeaderBytes);
@@ -302,8 +300,8 @@ void Quantizer::Dequantize(const uint8_t* payloads, size_t n,
   } else {
     if (impl_->use_beta) {
       for (size_t i = 0; i < n; ++i) {
-        internal::DequantizeBeta(*impl_->padded, impl_->bits,
-                                 payloads + i * ps, x_out + i * d);
+        internal::DequantizeBeta(*impl_->padded, impl_->bits, payloads + i * ps,
+                                 x_out + i * d);
       }
     } else {
       for (size_t i = 0; i < n; ++i) {
