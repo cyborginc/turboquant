@@ -15,32 +15,70 @@ option(TURBOQUANT_BUILD_BENCH "Build microbenchmarks" ON)
 option(TURBOQUANT_BUILD_DATASET_BENCH "Build HDF5 dataset bench (needs HDF5+BLAS)" ON)
 
 # --- Highway ----------------------------------------------------------------
-find_package(HWY QUIET)
-if(NOT HWY_FOUND)
-  find_path(HWY_INCLUDE_DIR hwy/highway.h)
-  find_library(HWY_LIBRARY NAMES hwy)
-  if(NOT HWY_INCLUDE_DIR OR NOT HWY_LIBRARY)
-    include(FetchContent)
-    FetchContent_Declare(
-      highway
-      GIT_REPOSITORY https://github.com/google/highway.git
-      GIT_TAG 1.0.7
-    )
-    set(HWY_ENABLE_CONTRIB OFF CACHE BOOL "" FORCE)
-    set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(highway)
-    set(TURBOQUANT_HWY_TARGET hwy)
-  else()
-    add_library(turboquant_hwy_imported INTERFACE)
-    target_include_directories(turboquant_hwy_imported INTERFACE ${HWY_INCLUDE_DIR})
-    target_link_libraries(turboquant_hwy_imported INTERFACE ${HWY_LIBRARY})
-    set(TURBOQUANT_HWY_TARGET turboquant_hwy_imported)
-  endif()
-else()
+# Resolution order matters. TurboQuant is normally consumed via add_subdirectory
+# or FetchContent from a parent that already builds Highway (cyborgdb-core does),
+# and linking two different Highway versions into one binary is a real hazard —
+# so an explicit choice from the parent must win over anything found on the host.
+# Probing the system first would silently ignore the parent on any machine that
+# happens to have a system libhwy installed.
+#
+# Default fetch tag matches the Highway cyborgdb-core builds against. Encoded
+# payloads are byte-identical across 1.0.7, 1.3.0 and 1.4.0 (verified by
+# tests/test_golden.cc), so the version does not affect the on-disk format.
+set(TURBOQUANT_HWY_GIT_TAG "1.4.0" CACHE STRING
+    "Highway version to fetch when no existing Highway is supplied or found")
+
+if(TARGET hwy)
+  # 1. Parent already declared a Highway target (FetchContent/add_subdirectory).
+  #    Nothing to find: reuse it verbatim.
+  set(TURBOQUANT_HWY_TARGET hwy)
+  set(TURBOQUANT_HWY_ORIGIN "parent target 'hwy'")
+elseif(TARGET hwy::hwy)
   set(TURBOQUANT_HWY_TARGET hwy::hwy)
+  set(TURBOQUANT_HWY_ORIGIN "parent target 'hwy::hwy'")
+elseif(HWY_INCLUDE_DIR AND HWY_LIBRARY)
+  # 2. Parent pre-seeded the paths explicitly. Honour them without probing.
+  add_library(turboquant_hwy_imported INTERFACE)
+  target_include_directories(turboquant_hwy_imported INTERFACE ${HWY_INCLUDE_DIR})
+  target_link_libraries(turboquant_hwy_imported INTERFACE ${HWY_LIBRARY})
+  set(TURBOQUANT_HWY_TARGET turboquant_hwy_imported)
+  set(TURBOQUANT_HWY_ORIGIN "caller-supplied HWY_INCLUDE_DIR=${HWY_INCLUDE_DIR}")
+else()
+  # 3. Standalone build: installed package, then system paths, then fetch.
+  find_package(HWY QUIET)
+  if(HWY_FOUND)
+    set(TURBOQUANT_HWY_TARGET hwy::hwy)
+    set(TURBOQUANT_HWY_ORIGIN "find_package(HWY)")
+  else()
+    find_path(HWY_INCLUDE_DIR hwy/highway.h)
+    find_library(HWY_LIBRARY NAMES hwy)
+    if(HWY_INCLUDE_DIR AND HWY_LIBRARY)
+      add_library(turboquant_hwy_imported INTERFACE)
+      target_include_directories(turboquant_hwy_imported INTERFACE ${HWY_INCLUDE_DIR})
+      target_link_libraries(turboquant_hwy_imported INTERFACE ${HWY_LIBRARY})
+      set(TURBOQUANT_HWY_TARGET turboquant_hwy_imported)
+      set(TURBOQUANT_HWY_ORIGIN "system ${HWY_LIBRARY}")
+    else()
+      include(FetchContent)
+      FetchContent_Declare(
+        highway
+        GIT_REPOSITORY https://github.com/google/highway.git
+        GIT_TAG ${TURBOQUANT_HWY_GIT_TAG}
+      )
+      set(HWY_ENABLE_CONTRIB OFF CACHE BOOL "" FORCE)
+      set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+      set(HWY_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+      set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+      FetchContent_MakeAvailable(highway)
+      set(TURBOQUANT_HWY_TARGET hwy)
+      set(TURBOQUANT_HWY_ORIGIN "fetched ${TURBOQUANT_HWY_GIT_TAG}")
+    endif()
+  endif()
 endif()
+
+# Say which one won. The failure mode this guards against is silent, so make the
+# resolution visible in every configure log.
+message(STATUS "TurboQuant Highway: ${TURBOQUANT_HWY_ORIGIN}")
 
 # --- Library ----------------------------------------------------------------
 add_library(turboquant
@@ -63,12 +101,29 @@ endif()
 
 # --- Tests ------------------------------------------------------------------
 if(TURBOQUANT_BUILD_TESTS)
-  find_package(GTest REQUIRED)
+  # Prefer an installed GTest; fall back to fetching a pinned one so a bare
+  # checkout can run the suite without a system package (mirrors the Highway
+  # handling above).
+  find_package(GTest QUIET)
+  if(NOT GTest_FOUND AND NOT TARGET GTest::gtest)
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG v1.14.0
+      GIT_SHALLOW TRUE
+    )
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+  endif()
   enable_testing()
   add_executable(turboquant_tests
     tests/test_packing.cc
     tests/test_rotation.cc
     tests/test_roundtrip.cc
+    tests/test_golden.cc
+    tests/test_robustness.cc
   )
   target_include_directories(turboquant_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(turboquant_tests PRIVATE turboquant GTest::gtest GTest::gtest_main)
@@ -78,7 +133,12 @@ if(TURBOQUANT_BUILD_TESTS)
   # If GTest was found outside the default dyld search path (e.g. conda or a
   # custom prefix), bake the library's directory into the test binary's rpath
   # so `ctest` works without DYLD_LIBRARY_PATH gymnastics.
-  get_target_property(_gtest_loc GTest::gtest LOCATION)
+  # Only meaningful for an installed GTest; a FetchContent'd one is built in
+  # this tree and LOCATION is not readable on non-imported targets.
+  set(_gtest_loc "")
+  if(GTest_FOUND)
+    get_target_property(_gtest_loc GTest::gtest LOCATION)
+  endif()
   if(_gtest_loc)
     get_filename_component(_gtest_dir "${_gtest_loc}" DIRECTORY)
     set_target_properties(turboquant_tests PROPERTIES
