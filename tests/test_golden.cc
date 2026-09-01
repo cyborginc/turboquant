@@ -84,21 +84,26 @@ struct GoldenCase {
 
 // dim=768 exercises the mixed-radix path (dim = 3 * 2^k, no padding);
 // dim=1000 exercises the padded Walsh-Hadamard path (padded to 1024).
-// Generated on 2026-09-01 against NEON and NEON_BF16, which agree
-// byte-for-byte.
+//
+// These values are intended to be reproducible on every target and toolchain,
+// which required two fixes: building with -ffp-contract=off (GCC and Clang
+// fused differently) and making CentroidInnerProduct a width-independent scalar
+// reduction (each SIMD lane count summed in a different order). Verified
+// identical under Clang/libc++ and GCC 16/libstdc++ on arm64, and across the
+// x86 SSE2/SSSE3/SSE4/AVX2/AVX3 spread in CI.
 const GoldenCase kGoldens[] = {
-    {768, QuantBits::B1, 100, 0xcb4a051656fee950ULL},
-    {768, QuantBits::B2, 196, 0xd62a6d4f26be77f2ULL},
-    {768, QuantBits::B3, 292, 0x7b3e21c3c8917a38ULL},
-    {768, QuantBits::B4, 388, 0x3660bf9b46eebf1eULL},
-    {768, QuantBits::B6, 580, 0x64cf5dc2348f3dccULL},
+    {768, QuantBits::B1, 100, 0x2bd1cc0aec092d1eULL},
+    {768, QuantBits::B2, 196, 0x6f652429ab896ea2ULL},
+    {768, QuantBits::B3, 292, 0x3801088a292033aaULL},
+    {768, QuantBits::B4, 388, 0x031ffc1bdb5434bcULL},
+    {768, QuantBits::B6, 580, 0xa9cd502d44a43360ULL},
     {768, QuantBits::B8, 772, 0x0d551a221d5c1083ULL},
     {768, QuantBits::B12, 1156, 0xaaf57915702bfbe1ULL},
-    {1000, QuantBits::B1, 132, 0x610f86d29d2be84bULL},
-    {1000, QuantBits::B2, 260, 0x2730ddfc518f4467ULL},
-    {1000, QuantBits::B3, 388, 0x08065455cbfe5539ULL},
-    {1000, QuantBits::B4, 516, 0x5ff28fa94fa6fb3cULL},
-    {1000, QuantBits::B6, 772, 0x870af48f78625134ULL},
+    {1000, QuantBits::B1, 132, 0x5af8dc1b8309bc24ULL},
+    {1000, QuantBits::B2, 260, 0xe69bc85bc13962bdULL},
+    {1000, QuantBits::B3, 388, 0xd710cd2f19d1b21dULL},
+    {1000, QuantBits::B4, 516, 0x7cd6888b5ddd6af8ULL},
+    {1000, QuantBits::B6, 772, 0xba843f882ee3855cULL},
     {1000, QuantBits::B8, 1028, 0xa8740ef639b69c21ULL},
     {1000, QuantBits::B12, 1540, 0x0715d4afb343192dULL},
 };
@@ -220,7 +225,7 @@ TEST(GoldenLayout, LiteralBytesForOneVector) {
   ASSERT_EQ(payload.size(), 388u);
   // First 16 bytes: 4-byte scale followed by the first 12 bytes of codes.
   static const uint8_t kExpectedPrefix[16] = {
-      0x27, 0x61, 0x81, 0x41, 0xAD, 0x7A, 0x4B, 0x79,
+      0x26, 0x61, 0x81, 0x41, 0xAD, 0x7A, 0x4B, 0x79,
       0x88, 0x68, 0x78, 0x44, 0x72, 0x88, 0x3B, 0xC8,
   };
   const std::vector<uint8_t> got(payload.begin(), payload.begin() + 16);
