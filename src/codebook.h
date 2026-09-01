@@ -2,6 +2,7 @@
 #define TURBOQUANT_SRC_CODEBOOK_H_
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "turboquant/turboquant.h"
@@ -39,6 +40,35 @@ class BetaCodebook {
   std::vector<float> boundaries_;
   std::vector<float> centroids_;
   std::vector<float> pos_bounds_pad_;
+};
+
+// Memoizing owner of the BetaCodebooks for one rotation dimension.
+//
+// A codebook costs ~10-30 ms to build and depends only on (bits, dim), but a
+// given Quantizer uses at most one bit width — and the affine widths (b8/b12)
+// use none at all. Building the full set up front therefore spends most of its
+// time on codebooks nobody reads, so entries are built on first request and
+// memoized.
+//
+// Thread-safety: Get() is safe to call concurrently. The fast path is a single
+// acquire load; construction is serialized by a mutex and double-checked, so a
+// width is built exactly once. Returned pointers are owned by the cache and
+// stay valid for its lifetime (entries are never evicted or moved).
+class BetaCodebookCache {
+ public:
+  explicit BetaCodebookCache(size_t codebook_dim);
+  ~BetaCodebookCache();
+  BetaCodebookCache(BetaCodebookCache&&) noexcept;
+  BetaCodebookCache& operator=(BetaCodebookCache&&) noexcept;
+  BetaCodebookCache(const BetaCodebookCache&) = delete;
+  BetaCodebookCache& operator=(const BetaCodebookCache&) = delete;
+
+  // nullptr if `bits` is out of range. Otherwise never null.
+  const BetaCodebook* Get(QuantBits bits) const;
+
+ private:
+  struct State;
+  std::unique_ptr<State> state_;
 };
 
 }  // namespace turboquant

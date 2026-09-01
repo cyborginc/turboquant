@@ -6,11 +6,10 @@
 #include <memory>
 #include <vector>
 
+#include "codebook.h"
 #include "turboquant/turboquant.h"
 
 namespace turboquant {
-
-class BetaCodebook;  // src/codebook.h
 
 namespace internal {
 
@@ -40,7 +39,7 @@ class RotatorPadded {
   size_t dim_;
   size_t padded_dim_;
   std::vector<float> signs_;
-  std::vector<std::unique_ptr<BetaCodebook>> beta_codebooks_;
+  BetaCodebookCache beta_codebooks_;
 };
 
 }  // namespace internal

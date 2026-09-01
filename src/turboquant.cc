@@ -62,18 +62,16 @@ thread_local std::vector<uint16_t> tls_codes;
 namespace internal {
 
 RotatorPadded::RotatorPadded(size_t dim, uint64_t seed)
-    : dim_(dim), padded_dim_(NextPow2(dim)), signs_(padded_dim_, 1.0f) {
+    : dim_(dim),
+      padded_dim_(NextPow2(dim)),
+      signs_(padded_dim_, 1.0f),
+      // Codebooks are built on first use, not here: a Quantizer reads at most
+      // one bit width, and the affine widths read none.
+      beta_codebooks_(padded_dim_) {
   uint64_t s = seed ? seed : 0xD1B54A32D192ED03ULL;
   for (size_t i = 0; i < padded_dim_; ++i) {
     const uint64_t r = SplitMix64(s);
     signs_[i] = (r & 1ULL) ? 1.0f : -1.0f;
-  }
-  // Beta codebooks for all bit widths supported by the public API.
-  beta_codebooks_.resize(13);
-  for (QuantBits b : {QuantBits::B1, QuantBits::B2, QuantBits::B3, QuantBits::B4,
-                      QuantBits::B6, QuantBits::B8, QuantBits::B12}) {
-    const int bi = BitsInt(b);
-    beta_codebooks_[bi] = std::make_unique<BetaCodebook>(b, padded_dim_);
   }
 }
 
@@ -82,9 +80,7 @@ RotatorPadded::RotatorPadded(RotatorPadded&&) noexcept = default;
 RotatorPadded& RotatorPadded::operator=(RotatorPadded&&) noexcept = default;
 
 const BetaCodebook* RotatorPadded::beta_codebook(QuantBits bits) const {
-  const int bi = BitsInt(bits);
-  if (bi < 0 || static_cast<size_t>(bi) >= beta_codebooks_.size()) return nullptr;
-  return beta_codebooks_[bi].get();
+  return beta_codebooks_.Get(bits);
 }
 
 void RotatorPadded::Apply(const float* x, float* out) const {
