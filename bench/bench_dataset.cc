@@ -7,7 +7,8 @@
 //   /distance  optional, ignored
 //
 // Recall@K is measured for each bit width vs. the float32 brute-force baseline.
-// Speeds: ingest (quant vs none), read (dequant vs none), distance (ADC vs BLAS GEMM).
+// Speeds: ingest (quant vs none), read (dequant vs none), distance (ADC vs BLAS
+// GEMM).
 
 #if defined(TURBOQUANT_USE_ACCELERATE)
 // Opt into the newer CBLAS surface so cblas_sgemm isn't flagged deprecated.
@@ -72,7 +73,7 @@ struct Dataset {
   std::vector<float> train;        // n_train * dim, row-major
   std::vector<float> test;         // n_test  * dim
   std::vector<int32_t> neighbors;  // n_test  * k_gt
-  std::string metric;              // "euclidean" or "angular" (best-effort guess)
+  std::string metric;  // "euclidean" or "angular" (best-effort guess)
 };
 
 bool ReadDataset(const std::string& path, Dataset* ds) {
@@ -81,8 +82,8 @@ bool ReadDataset(const std::string& path, Dataset* ds) {
     std::fprintf(stderr, "Failed to open %s\n", path.c_str());
     return false;
   }
-  auto read_float = [&](const char* name, std::vector<float>* out,
-                        size_t* rows, size_t* cols) {
+  auto read_float = [&](const char* name, std::vector<float>* out, size_t* rows,
+                        size_t* cols) {
     hid_t dset = H5Dopen2(file, name, H5P_DEFAULT);
     if (dset < 0) return false;
     hid_t space = H5Dget_space(dset);
@@ -168,12 +169,16 @@ double Now() {
   return std::chrono::duration<double>(clk::now().time_since_epoch()).count();
 }
 
-void TopKByScore(const float* scores, size_t n, int k, std::vector<int32_t>* out,
-                 bool larger_is_better) {
+void TopKByScore(const float* scores, size_t n, int k,
+                 std::vector<int32_t>* out, bool larger_is_better) {
   // Min/max heap of (score, idx); we want top-k by larger_is_better.
   using Pair = std::pair<float, int32_t>;
-  auto cmp_max = [](const Pair& a, const Pair& b) { return a.first > b.first; };  // min-heap of largest
-  auto cmp_min = [](const Pair& a, const Pair& b) { return a.first < b.first; };  // max-heap of smallest
+  auto cmp_max = [](const Pair& a, const Pair& b) {
+    return a.first > b.first;
+  };  // min-heap of largest
+  auto cmp_min = [](const Pair& a, const Pair& b) {
+    return a.first < b.first;
+  };  // max-heap of smallest
   if (larger_is_better) {
     std::priority_queue<Pair, std::vector<Pair>, decltype(cmp_max)> pq(cmp_max);
     for (size_t i = 0; i < n; ++i) {
@@ -247,7 +252,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     NormalizeRows(ds.train.data(), ds.n_train, ds.dim);
     NormalizeRows(ds.test.data(), ds.n_test, ds.dim);
   }
-  const bool larger_is_better = angular;  // cosine: larger is closer; L2: smaller
+  const bool larger_is_better =
+      angular;  // cosine: larger is closer; L2: smaller
 
   // -------------------- Ingest speed --------------------
   std::printf("\n[Ingest: quantize train set]\n");
@@ -267,8 +273,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
       turboquant::internal::RotatorMixed3::DimSupported(ds.dim);
   std::unique_ptr<turboquant::internal::RotatorMixed3> R_mixed;
   if (mixed3_supported) {
-    R_mixed = std::make_unique<turboquant::internal::RotatorMixed3>(ds.dim,
-                                                                    0x12345);
+    R_mixed =
+        std::make_unique<turboquant::internal::RotatorMixed3>(ds.dim, 0x12345);
   } else {
     std::printf("(mixed-radix rotation: skipped — dim=%zu is not 3*2^k)\n",
                 ds.dim);
@@ -284,8 +290,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                   ds.dim * sizeof(float));
     }
     t_baseline_copy = Now() - t0;
-    std::printf("%-8s %-8s %15.2f %15.2f  (baseline memcpy)\n", "memcpy",
-                "f32", 1000.0 * t_baseline_copy,
+    std::printf("%-8s %-8s %15.2f %15.2f  (baseline memcpy)\n", "memcpy", "f32",
+                1000.0 * t_baseline_copy,
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / t_baseline_copy);
   }
 #if TURBOQUANT_HAS_FP16
@@ -312,9 +318,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                                            all_payloads[bi].data() + i * ps);
     }
     const double dt = Now() - t0;
-    std::printf("%-8s b%-7d %15.2f %15.2f\n", "affine",
-                static_cast<int>(b), 1000.0 * dt,
-                (ds.n_train * ps) / 1e6 / dt);
+    std::printf("%-8s b%-7d %15.2f %15.2f\n", "affine", static_cast<int>(b),
+                1000.0 * dt, (ds.n_train * ps) / 1e6 / dt);
   }
   // Beta variant ingest (all bit widths — branch-free binary search keeps
   // b8/b12 tractable).
@@ -329,9 +334,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
                                          all_payloads_beta[bi].data() + i * ps);
     }
     const double dt = Now() - t0;
-    std::printf("%-8s b%-7d %15.2f %15.2f\n", "beta",
-                static_cast<int>(b), 1000.0 * dt,
-                (ds.n_train * ps) / 1e6 / dt);
+    std::printf("%-8s b%-7d %15.2f %15.2f\n", "beta", static_cast<int>(b),
+                1000.0 * dt, (ds.n_train * ps) / 1e6 / dt);
   }
 
   // Mixed-radix ingest (no padding — payload is strictly smaller for
@@ -351,10 +355,11 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
             all_payloads_mixed[bi].data() + i * ps);
       }
       const double dt = Now() - t0;
-      std::printf("%-8s b%-7d %15.2f %15.2f  (payload %zu B, %.0f%% of padded)\n",
-                  "mix3 bet", static_cast<int>(b), 1000.0 * dt,
-                  (ds.n_train * ps) / 1e6 / dt, ps,
-                  100.0 * static_cast<double>(ps) / payload_sizes[bi]);
+      std::printf(
+          "%-8s b%-7d %15.2f %15.2f  (payload %zu B, %.0f%% of padded)\n",
+          "mix3 bet", static_cast<int>(b), 1000.0 * dt,
+          (ds.n_train * ps) / 1e6 / dt, ps,
+          100.0 * static_cast<double>(ps) / payload_sizes[bi]);
     }
     for (int bi = 0; bi < kNumBits; ++bi) {
       const QuantBits b = bits_list[bi];
@@ -368,9 +373,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
             all_payloads_mixed_aff[bi].data() + i * ps);
       }
       const double dt = Now() - t0;
-      std::printf("%-8s b%-7d %15.2f %15.2f\n",
-                  "mix3 aff", static_cast<int>(b), 1000.0 * dt,
-                  (ds.n_train * ps) / 1e6 / dt);
+      std::printf("%-8s b%-7d %15.2f %15.2f\n", "mix3 aff", static_cast<int>(b),
+                  1000.0 * dt, (ds.n_train * ps) / 1e6 / dt);
     }
   }
 
@@ -389,8 +393,7 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
       Fp16ToFp32(fp16_train.data() + i * ds.dim, ds.dim, out.data());
     }
     const double dt = Now() - t0;
-    std::printf("%-10s %-8s %15.2f %15.2f\n", "fp16->f32", "fp16",
-                1000.0 * dt,
+    std::printf("%-10s %-8s %15.2f %15.2f\n", "fp16->f32", "fp16", 1000.0 * dt,
                 (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
   }
 #endif
@@ -405,8 +408,7 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     }
     const double dt = Now() - t0;
     std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_affine", static_cast<int>(b),
-                1000.0 * dt,
-                (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
+                1000.0 * dt, (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
   }
   for (int bi = 0; bi < kNumBits; ++bi) {
     const QuantBits b = bits_list[bi];
@@ -419,8 +421,7 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     }
     const double dt = Now() - t0;
     std::printf("%-10s %-8d %15.2f %15.2f\n", "deq_beta", static_cast<int>(b),
-                1000.0 * dt,
-                (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
+                1000.0 * dt, (ds.n_train * ds.dim * sizeof(float)) / 1e6 / dt);
   }
   if (mixed3_supported) {
     for (int bi = 0; bi < kNumBits; ++bi) {
@@ -469,16 +470,16 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
   double t_blas = 0;
   {
     const double t0 = Now();
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                static_cast<int>(Nq), static_cast<int>(ds.n_train),
-                static_cast<int>(ds.dim), 1.0f, ds.test.data(),
-                static_cast<int>(ds.dim), ds.train.data(),
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, static_cast<int>(Nq),
+                static_cast<int>(ds.n_train), static_cast<int>(ds.dim), 1.0f,
+                ds.test.data(), static_cast<int>(ds.dim), ds.train.data(),
                 static_cast<int>(ds.dim), 0.0f, blas_scores.data(),
                 static_cast<int>(ds.n_train));
     t_blas = Now() - t0;
   }
 
-  // Precompute base norms (needed for euclidean ranking from a dot-product source).
+  // Precompute base norms (needed for euclidean ranking from a dot-product
+  // source).
   std::vector<float> base_norms2;
   if (!angular) {
     base_norms2.resize(ds.n_train);
@@ -512,12 +513,11 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
   }
 
   // Header
-  std::printf("\n%-18s %12s %12s %10s %12s\n",
-              "path", "ms_total", "Mops/s", "recall@K", "rel_vs_f32");
-  std::printf("%-18s %12.2f %12.2f %10.4f %12s\n",
-              "f32 (BLAS)", 1000.0 * t_blas,
-              static_cast<double>(Nq) * ds.n_train / 1e6 / t_blas,
-              1.0, "1.00x");
+  std::printf("\n%-18s %12s %12s %10s %12s\n", "path", "ms_total", "Mops/s",
+              "recall@K", "rel_vs_f32");
+  std::printf(
+      "%-18s %12.2f %12.2f %10.4f %12s\n", "f32 (BLAS)", 1000.0 * t_blas,
+      static_cast<double>(Nq) * ds.n_train / 1e6 / t_blas, 1.0, "1.00x");
 
 #if TURBOQUANT_HAS_FP16
   // fp16+BLAS: convert the entire fp16 base back to fp32 in one shot, then
@@ -530,10 +530,9 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 
     std::vector<float> fp16_dots(Nq * ds.n_train);
     const double t_gemm0 = Now();
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                static_cast<int>(Nq), static_cast<int>(ds.n_train),
-                static_cast<int>(ds.dim), 1.0f, ds.test.data(),
-                static_cast<int>(ds.dim), fp16_dec.data(),
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, static_cast<int>(Nq),
+                static_cast<int>(ds.n_train), static_cast<int>(ds.dim), 1.0f,
+                ds.test.data(), static_cast<int>(ds.dim), fp16_dec.data(),
                 static_cast<int>(ds.dim), 0.0f, fp16_dots.data(),
                 static_cast<int>(ds.n_train));
     const double t_gemm = Now() - t_gemm0;
@@ -572,10 +571,11 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     const double ops = static_cast<double>(Nq) * ds.n_train;
     char rel[16];
     std::snprintf(rel, sizeof(rel), "%.2fx", t_total / t_blas);
-    std::printf("%-18s %12.2f %12.2f %10.4f %12s"
-                "  (%.0fms dec + %.0fms gemm)\n",
-                "fp16+BLAS", 1000.0 * t_total, ops / 1e6 / t_total,
-                recall_sum / Nq, rel, 1000.0 * t_dec, 1000.0 * t_gemm);
+    std::printf(
+        "%-18s %12.2f %12.2f %10.4f %12s"
+        "  (%.0fms dec + %.0fms gemm)\n",
+        "fp16+BLAS", 1000.0 * t_total, ops / 1e6 / t_total, recall_sum / Nq,
+        rel, 1000.0 * t_dec, 1000.0 * t_gemm);
   }
 #endif
 
@@ -585,10 +585,10 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     if (angular) {
       for (size_t j = 0; j < ds.n_train; ++j) (*out)[j] = dots[j];
     } else {
-      // Use the appropriate base norms (original for f32 baseline; dequant norms
-      // when scoring against dequantized base).
-      const float* nrm = base_norm2_for_dequant ? base_norm2_for_dequant
-                                                : base_norms2.data();
+      // Use the appropriate base norms (original for f32 baseline; dequant
+      // norms when scoring against dequantized base).
+      const float* nrm =
+          base_norm2_for_dequant ? base_norm2_for_dequant : base_norms2.data();
       for (size_t j = 0; j < ds.n_train; ++j) {
         (*out)[j] = nrm[j] - 2.0f * dots[j];
       }
@@ -599,8 +599,8 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 
   using DeqFn = void (*)(const Rotator&, QuantBits, const uint8_t*, float*);
   auto run_variant = [&](const char* label_kind, DeqFn fn,
-                          const std::vector<uint8_t>& payloads, size_t ps,
-                          QuantBits b) {
+                         const std::vector<uint8_t>& payloads, size_t ps,
+                         QuantBits b) {
     dequant_buf.assign(ds.n_train * ds.dim, 0.0f);
     const double t_deq0 = Now();
     for (size_t j = 0; j < ds.n_train; ++j) {
@@ -610,10 +610,9 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 
     std::vector<float> deq_dots(Nq * ds.n_train);
     const double t_gemm0 = Now();
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                static_cast<int>(Nq), static_cast<int>(ds.n_train),
-                static_cast<int>(ds.dim), 1.0f, ds.test.data(),
-                static_cast<int>(ds.dim), dequant_buf.data(),
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, static_cast<int>(Nq),
+                static_cast<int>(ds.n_train), static_cast<int>(ds.dim), 1.0f,
+                ds.test.data(), static_cast<int>(ds.dim), dequant_buf.data(),
                 static_cast<int>(ds.dim), 0.0f, deq_dots.data(),
                 static_cast<int>(ds.n_train));
     const double t_gemm = Now() - t_gemm0;
@@ -647,15 +646,15 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 
     const double ops = static_cast<double>(Nq) * ds.n_train;
     char label[40];
-    std::snprintf(label, sizeof(label), "b%-2d %s+BLAS",
-                  static_cast<int>(b), label_kind);
+    std::snprintf(label, sizeof(label), "b%-2d %s+BLAS", static_cast<int>(b),
+                  label_kind);
     char rel[16];
     std::snprintf(rel, sizeof(rel), "%.2fx", t_deqblas / t_blas);
-    std::printf("%-18s %12.2f %12.2f %10.4f %12s"
-                "  (%.0fms deq + %.0fms gemm)\n",
-                label, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas,
-                deq_recall_sum / Nq, rel,
-                1000.0 * t_deq, 1000.0 * t_gemm);
+    std::printf(
+        "%-18s %12.2f %12.2f %10.4f %12s"
+        "  (%.0fms deq + %.0fms gemm)\n",
+        label, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas, deq_recall_sum / Nq,
+        rel, 1000.0 * t_deq, 1000.0 * t_gemm);
   };
 
   using DeqMixedFn = void (*)(const turboquant::internal::RotatorMixed3&,
@@ -673,10 +672,9 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
 
     std::vector<float> deq_dots(Nq * ds.n_train);
     const double t_gemm0 = Now();
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                static_cast<int>(Nq), static_cast<int>(ds.n_train),
-                static_cast<int>(ds.dim), 1.0f, ds.test.data(),
-                static_cast<int>(ds.dim), dequant_buf.data(),
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, static_cast<int>(Nq),
+                static_cast<int>(ds.n_train), static_cast<int>(ds.dim), 1.0f,
+                ds.test.data(), static_cast<int>(ds.dim), dequant_buf.data(),
                 static_cast<int>(ds.dim), 0.0f, deq_dots.data(),
                 static_cast<int>(ds.n_train));
     const double t_gemm = Now() - t_gemm0;
@@ -708,15 +706,15 @@ void RunOnDataset(const std::string& path, int k_eval, size_t max_test) {
     const double t_deqblas = t_deq + t_gemm;
     const double ops = static_cast<double>(Nq) * ds.n_train;
     char label[48];
-    std::snprintf(label, sizeof(label), "b%-2d %s+BLAS",
-                  static_cast<int>(b), label_kind);
+    std::snprintf(label, sizeof(label), "b%-2d %s+BLAS", static_cast<int>(b),
+                  label_kind);
     char rel[16];
     std::snprintf(rel, sizeof(rel), "%.2fx", t_deqblas / t_blas);
-    std::printf("%-18s %12.2f %12.2f %10.4f %12s"
-                "  (%.0fms deq + %.0fms gemm)\n",
-                label, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas,
-                deq_recall_sum / Nq, rel,
-                1000.0 * t_deq, 1000.0 * t_gemm);
+    std::printf(
+        "%-18s %12.2f %12.2f %10.4f %12s"
+        "  (%.0fms deq + %.0fms gemm)\n",
+        label, 1000.0 * t_deqblas, ops / 1e6 / t_deqblas, deq_recall_sum / Nq,
+        rel, 1000.0 * t_deq, 1000.0 * t_gemm);
   };
 
   for (int bi = 0; bi < kNumBits; ++bi) {

@@ -12,9 +12,9 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "turboquant/turboquant.h"
+#include "rotator_mixed.h"  // RotatorMixed3 + QuantizeMixed3 / DequantizeMixed3 / Affine variants.
 #include "rotator_padded.h"  // RotatorPadded
-#include "rotator_mixed.h"   // RotatorMixed3 + QuantizeMixed3 / DequantizeMixed3 / Affine variants.
+#include "turboquant/turboquant.h"
 
 namespace turboquant {
 namespace internal {

@@ -1,7 +1,11 @@
+// clang-format off
+// foreach_target.h must precede highway.h and both must lead the file: this
+// translation unit re-includes itself once per SIMD target. Do not reorder.
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "kernels.cc"
 #include <hwy/foreach_target.h>
 #include <hwy/highway.h>
+// clang-format on
 
 #include <cmath>
 #include <cstddef>
@@ -32,8 +36,8 @@ float MaxAbsImpl(const float* data, size_t n) {
   return m;
 }
 
-void QuantizeAffineImpl(const float* data, size_t n, float scale, int zero_point,
-                        int max_code, uint16_t* codes_out) {
+void QuantizeAffineImpl(const float* data, size_t n, float scale,
+                        int zero_point, int max_code, uint16_t* codes_out) {
   const float inv_scale = 1.0f / scale;
   const hn::ScalableTag<float> df;
   const hn::Rebind<int32_t, decltype(df)> di32;
@@ -178,28 +182,6 @@ void DecodeBetaCodebookImpl(const uint16_t* codes, size_t n,
   }
 }
 
-float CentroidInnerProductImpl(const float* values, const uint16_t* codes,
-                               size_t n, const float* centroids) {
-  const hn::ScalableTag<float> df;
-  const hn::Rebind<int32_t, decltype(df)> di32;
-  const hn::Rebind<uint16_t, decltype(df)> du16;
-  const size_t lanes = hn::Lanes(df);
-  auto vacc = hn::Zero(df);
-  size_t i = 0;
-  for (; i + lanes <= n; i += lanes) {
-    const auto vu16 = hn::LoadU(du16, codes + i);
-    const auto vi32 = hn::PromoteTo(di32, vu16);
-    const auto vc = hn::GatherIndex(df, centroids, vi32);
-    const auto vv = hn::LoadU(df, values + i);
-    vacc = hn::MulAdd(vv, vc, vacc);
-  }
-  float acc = hn::ReduceSum(df, vacc);
-  for (; i < n; ++i) {
-    acc += values[i] * centroids[codes[i]];
-  }
-  return acc;
-}
-
 }  // namespace HWY_NAMESPACE
 }  // namespace turboquant
 HWY_AFTER_NAMESPACE();
@@ -214,7 +196,6 @@ HWY_EXPORT(DequantizeAffineImpl);
 HWY_EXPORT(DequantizeBinaryImpl);
 HWY_EXPORT(EncodeBetaCodebookImpl);
 HWY_EXPORT(DecodeBetaCodebookImpl);
-HWY_EXPORT(CentroidInnerProductImpl);
 
 float MaxAbs(const float* data, size_t n) {
   return HWY_DYNAMIC_DISPATCH(MaxAbsImpl)(data, n);
@@ -239,18 +220,38 @@ void DequantizeBinary(const uint16_t* codes, size_t n, float scale,
 void EncodeBetaCodebook(const float* values, size_t n,
                         const float* pos_bounds_pad, QuantBits bits,
                         uint16_t* codes_out) {
-  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)(values, n, pos_bounds_pad, bits,
-                                               codes_out);
+  HWY_DYNAMIC_DISPATCH(EncodeBetaCodebookImpl)
+  (values, n, pos_bounds_pad, bits, codes_out);
 }
 void DecodeBetaCodebook(const uint16_t* codes, size_t n, const float* centroids,
                         float scale, float* data_out) {
-  HWY_DYNAMIC_DISPATCH(DecodeBetaCodebookImpl)(codes, n, centroids, scale,
-                                               data_out);
+  HWY_DYNAMIC_DISPATCH(DecodeBetaCodebookImpl)
+  (codes, n, centroids, scale, data_out);
 }
+// Deliberately scalar and deliberately not dynamically dispatched.
+//
+// This value becomes the 4-byte scale header of every Beta-path payload, so it
+// is part of a persisted format. A SIMD reduction accumulates into one partial
+// sum per lane and folds them at the end, which means the summation order — and
+// therefore the last-ULP result — depends on the vector width chosen at
+// runtime. Measured on an AMD EPYC 9V74: SSE2, SSSE3, SSE4, AVX2 and AVX3_ZEN4
+// each produced a different scale, so the same vector encoded to different
+// bytes depending on which host wrote it.
+//
+// Accumulating in double in index order is width-independent by construction
+// and gives the same answer on every target and compiler. The affine path is
+// unaffected because its scale comes from MaxAbs, and max is associative.
+//
+// Cost is one scalar pass over n floats on the encode path only, alongside the
+// scalar double norm loop the callers already run; decode never calls this.
 float CentroidInnerProduct(const float* values, const uint16_t* codes, size_t n,
                            const float* centroids) {
-  return HWY_DYNAMIC_DISPATCH(CentroidInnerProductImpl)(values, codes, n,
-                                                        centroids);
+  double acc = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    acc += static_cast<double>(values[i]) *
+           static_cast<double>(centroids[codes[i]]);
+  }
+  return static_cast<float>(acc);
 }
 
 }  // namespace turboquant

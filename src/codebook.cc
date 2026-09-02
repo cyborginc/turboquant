@@ -1,9 +1,13 @@
 #include "codebook.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <memory>
+#include <mutex>
 
 namespace turboquant {
 namespace {
@@ -61,13 +65,23 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
   const size_t num_levels = 1ull << static_cast<int>(bits);
   // Beta(a, a) on [-1, 1] where a = (padded_dim - 1) / 2 is the half-degrees-
   // of-freedom of a unit vector in R^padded_dim projected onto one coordinate.
-  const double a = 0.5 * (static_cast<double>(padded_dim) - 1.0);
+  //
+  // The density is bounded only for padded_dim >= 3 (a >= 1). At padded_dim 1
+  // the distribution is degenerate (the coordinate is always +/-1) and at 2 it
+  // is arcsine — both diverge at the endpoints, which the adaptive integrator
+  // below cannot resolve: its tolerance test never passes, so it recurses to
+  // the depth limit on every subinterval and takes ~2^50 evaluations. Neither
+  // dim carries a meaningful distribution to fit, so clamp to the smallest
+  // well-posed case. This leaves every padded_dim >= 3 codebook unchanged.
+  const double a =
+      0.5 * (static_cast<double>(std::max<size_t>(padded_dim, 3)) - 1.0);
   const double a_m1 = a - 1.0;
 
   auto pdf = [a_m1](double x) { return BetaPDFUnnorm(x, a_m1); };
   auto xpdf = [a_m1](double x) { return x * BetaPDFUnnorm(x, a_m1); };
 
-  // Initial centroids spread within ±3 std. Var(Beta(a,a) on [-1,1]) = 1/(2a+1).
+  // Initial centroids spread within ±3 std. Var(Beta(a,a) on [-1,1]) =
+  // 1/(2a+1).
   const double std_dev = 1.0 / std::sqrt(2.0 * a + 1.0);
   const double spread = std::min(0.9, 3.0 * std_dev);
 
@@ -120,8 +134,7 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
   // on it.
   if (num_levels >= 2) {
     for (size_t i = 0; i < num_levels / 2; ++i) {
-      const double mag =
-          0.5 * (centroids[num_levels - 1 - i] - centroids[i]);
+      const double mag = 0.5 * (centroids[num_levels - 1 - i] - centroids[i]);
       centroids[i] = -mag;
       centroids[num_levels - 1 - i] = mag;
     }
@@ -155,6 +168,56 @@ BetaCodebook::BetaCodebook(QuantBits bits, size_t padded_dim) {
   } else {
     pos_bounds_pad_.assign(1, std::numeric_limits<float>::infinity());
   }
+}
+
+// ---------------------------------------------------------------------------
+// BetaCodebookCache
+// ---------------------------------------------------------------------------
+
+// Slots are indexed by the raw bit value, so the array spans [0, 12] inclusive.
+// Index 0 is unused (no 0-bit width) but keeps the indexing arithmetic trivial.
+struct BetaCodebookCache::State {
+  explicit State(size_t d) : dim(d) {
+    for (auto& slot : slots) slot.store(nullptr, std::memory_order_relaxed);
+  }
+
+  size_t dim;
+  std::mutex mu;
+  std::array<std::atomic<const BetaCodebook*>, 13> slots;
+  // Owns what `slots` points at. unique_ptr elements mean a vector reallocation
+  // never invalidates a published pointer.
+  std::vector<std::unique_ptr<BetaCodebook>> owned;
+};
+
+BetaCodebookCache::BetaCodebookCache(size_t codebook_dim)
+    : state_(std::make_unique<State>(codebook_dim)) {}
+
+BetaCodebookCache::~BetaCodebookCache() = default;
+BetaCodebookCache::BetaCodebookCache(BetaCodebookCache&&) noexcept = default;
+BetaCodebookCache& BetaCodebookCache::operator=(BetaCodebookCache&&) noexcept =
+    default;
+
+const BetaCodebook* BetaCodebookCache::Get(QuantBits bits) const {
+  const int bi = static_cast<int>(bits);
+  if (bi <= 0 || static_cast<size_t>(bi) >= state_->slots.size()) {
+    return nullptr;
+  }
+  // Fast path: already built. Acquire pairs with the release store below, so
+  // the fully-constructed codebook is visible to this thread.
+  if (const BetaCodebook* cb =
+          state_->slots[bi].load(std::memory_order_acquire)) {
+    return cb;
+  }
+  std::lock_guard<std::mutex> lock(state_->mu);
+  // Re-check: another thread may have built this width while we waited.
+  if (const BetaCodebook* cb =
+          state_->slots[bi].load(std::memory_order_relaxed)) {
+    return cb;
+  }
+  state_->owned.push_back(std::make_unique<BetaCodebook>(bits, state_->dim));
+  const BetaCodebook* cb = state_->owned.back().get();
+  state_->slots[bi].store(cb, std::memory_order_release);
+  return cb;
 }
 
 }  // namespace turboquant

@@ -23,9 +23,10 @@ enum class QuantBits : uint8_t {
 // Beta codebook at b1/b2/b3/b4/b6, affine min/max at b8/b12) automatically.
 // The user never has to know which path was picked.
 //
-// Construction builds the Lloyd-Max codebook for the chosen bit width
-// (~10-200 ms at d=768 depending on configuration). After construction the
-// encode/decode paths are zero-allocation per call.
+// Construction is cheap. The Beta widths (b1-b6) build their Lloyd-Max
+// codebook on the first Quantize/Dequantize call and memoize it (0.3 ms at b1
+// up to 13 ms at b4, d=768); the affine widths (b8/b12) never build one at all.
+// Encode and decode are zero-allocation per call once the codebook exists.
 //
 // Thread-safety: Quantize/Dequantize are safe to call concurrently from
 // multiple threads against the same Quantizer instance (per-thread scratch

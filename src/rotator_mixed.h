@@ -6,11 +6,10 @@
 #include <memory>
 #include <vector>
 
+#include "codebook.h"
 #include "turboquant/turboquant.h"
 
 namespace turboquant {
-
-class BetaCodebook;  // src/codebook.h
 
 namespace internal {
 
@@ -39,7 +38,8 @@ class RotatorMixed3 {
 
   size_t dim() const { return dim_; }
   const float* signs() const { return signs_.data(); }
-  // Codebook computed for the true (unpadded) dim. nullptr for unsupported bits.
+  // Codebook computed for the true (unpadded) dim. nullptr for unsupported
+  // bits.
   const BetaCodebook* beta_codebook(QuantBits bits) const;
 
   // Forward rotation: out[i] for i in [0, dim).
@@ -52,7 +52,7 @@ class RotatorMixed3 {
   size_t dim_;
   size_t n_block_;  // dim_ / 3
   std::vector<float> signs_;
-  std::vector<std::unique_ptr<BetaCodebook>> beta_codebooks_;
+  BetaCodebookCache beta_codebooks_;
 };
 
 // Payload layout: 4-byte scale + dim*bits/8 packed-code bytes. Note this is

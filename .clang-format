@@ -1,0 +1,19 @@
+# Matches the style the codebase was already written in: Google C++, 2-space
+# indent, 80-column limit.
+#
+# CI pins clang-format 18 (see .github/workflows/ci.yml). Formatting output is
+# not stable across major clang-format releases, so a different local version
+# may disagree with CI — install 18 if you hit that.
+BasedOnStyle: Google
+Standard: c++17
+ColumnLimit: 80
+
+# Keep the existing include grouping: the public header first, then a blank
+# line, then everything else. clang-format would otherwise fold the project
+# header into the alphabetical block.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+# The SIMD sources re-include themselves through hwy/foreach_target.h, so their
+# leading include order is load-bearing; those blocks are fenced with
+# `// clang-format off` in the source rather than relaxed globally here.

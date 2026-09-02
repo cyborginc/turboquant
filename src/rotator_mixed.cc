@@ -38,22 +38,20 @@ bool RotatorMixed3::DimSupported(size_t dim) {
 }
 
 RotatorMixed3::RotatorMixed3(size_t dim, uint64_t seed)
-    : dim_(dim), n_block_(dim / 3), signs_(dim, 1.0f) {
+    : dim_(dim),
+      n_block_(dim / 3),
+      signs_(dim, 1.0f),
+      // Codebooks are computed against the true (unpadded) dim — coordinates
+      // of a rotated unit vector in R^dim follow Beta((dim-1)/2, (dim-1)/2) —
+      // and are built on first use, not here: a Quantizer reads at most one
+      // bit width, and the affine widths read none.
+      beta_codebooks_(dim) {
   assert(DimSupported(dim) && "RotatorMixed3 requires dim = 3 * 2^k");
 
   uint64_t s = seed ? seed : 0xD1B54A32D192ED03ULL;
   for (size_t i = 0; i < dim_; ++i) {
     const uint64_t r = SplitMix64(s);
     signs_[i] = (r & 1ULL) ? 1.0f : -1.0f;
-  }
-
-  // Beta codebooks computed against the true (unpadded) dim. Coordinates of a
-  // rotated unit vector in R^dim follow Beta((dim-1)/2, (dim-1)/2).
-  beta_codebooks_.resize(13);
-  for (QuantBits b : {QuantBits::B1, QuantBits::B2, QuantBits::B3, QuantBits::B4,
-                      QuantBits::B6, QuantBits::B8, QuantBits::B12}) {
-    const int bi = BitsInt(b);
-    beta_codebooks_[bi] = std::make_unique<BetaCodebook>(b, dim_);
   }
 }
 
@@ -62,9 +60,7 @@ RotatorMixed3::RotatorMixed3(RotatorMixed3&&) noexcept = default;
 RotatorMixed3& RotatorMixed3::operator=(RotatorMixed3&&) noexcept = default;
 
 const BetaCodebook* RotatorMixed3::beta_codebook(QuantBits bits) const {
-  const int bi = BitsInt(bits);
-  if (bi < 0 || static_cast<size_t>(bi) >= beta_codebooks_.size()) return nullptr;
-  return beta_codebooks_[bi].get();
+  return beta_codebooks_.Get(bits);
 }
 
 void RotatorMixed3::Apply(const float* x, float* out) const {
@@ -131,10 +127,8 @@ void QuantizeMixed3(const RotatorMixed3& rot, QuantBits bits, const float* x,
   EncodeBetaCodebook(rotated, d, cb->positive_boundaries_padded(), bits, codes);
 
   // scale = ||v|| / <u_rot, x_hat>.
-  const float inner =
-      CentroidInnerProduct(rotated, codes, d, cb->centroids());
-  const float scale_eff =
-      std::abs(inner) > 1e-20f ? norm / inner : norm;
+  const float inner = CentroidInnerProduct(rotated, codes, d, cb->centroids());
+  const float scale_eff = std::abs(inner) > 1e-20f ? norm / inner : norm;
 
   std::memcpy(payload_out, &scale_eff, sizeof(float));
   PackCodes(codes, d, bits, payload_out + kHeaderBytes);
