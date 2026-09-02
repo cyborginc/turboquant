@@ -113,3 +113,7 @@ ctest --test-dir build
 ./build/turboquant_bench
 ./build/turboquant_dataset_bench datasets/glove-25-angular.hdf5 10 1000
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
